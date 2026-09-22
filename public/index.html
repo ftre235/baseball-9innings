@@ -41,7 +41,6 @@
   const HOME = { x: 480, y: 524 };
   const WALL_TOP = 150, WALL_BOTTOM = 202;
   const ZONE = { x: 444, y: 398, w: 72, h: 94 };
-  const RELEASE = { x: 506, y: 296 };
   const FENCE_CENTER = 110, FENCE_LINE = 95;
   const BATTER_X = 292, BATTER_GROUND = 548;
 
@@ -84,9 +83,18 @@
   const TOTAL_INNINGS = 9, MAX_INNINGS = 12;
 
   // ===================== 팀 =====================
-  function pitcher(name, stamina, control, arsenal, hand) {
+  // 암슬롯: 릴리스 높이 · 변화 방향 · 구속 · 같은 손 타자 상대 위력이 달라진다
+  const ARM_SLOTS = {
+    overhand:     { name: "오버핸드", angle: -1.25, bx: 0.85, by: 1.2,  speed: 1,  platoon: 1.0 },
+    threequarter: { name: "스리쿼터", angle: -0.72, bx: 1.0,  by: 1.0,  speed: 0,  platoon: 1.0 },
+    sidearm:      { name: "사이드암", angle: -0.08, bx: 1.5,  by: 0.75, speed: -3, platoon: 0.9 },
+    submarine:    { name: "언더핸드", angle: 0.48,  bx: 1.6,  by: 1.3,  speed: -8, platoon: 0.84 }
+  };
+  function armSlot(p) { return ARM_SLOTS[p.arm] || ARM_SLOTS.threequarter; }
+
+  function pitcher(name, stamina, control, arsenal, hand, arm) {
     return { name: name, max: stamina, stamina: stamina, control: control, arsenal: arsenal,
-      hand: hand || "R", pitches: 0, runs: 0, k: 0 };
+      hand: hand || "R", arm: arm || "threequarter", pitches: 0, runs: 0, k: 0 };
   }
   function batter(name, contact, power, speed, hand) {
     return { name: name, contact: contact, power: power, speed: speed, hand: hand || "R",
@@ -109,10 +117,10 @@
     ["최은우", 0.70, 0.95, 0.40, "L"], ["정시우", 0.74, 0.78, 0.55, "R"], ["강태현", 0.72, 0.70, 0.60, "L"],
     ["윤서진", 0.68, 0.62, 0.65, "R"], ["임수호", 0.66, 0.55, 0.72, "R"], ["오재민", 0.64, 0.45, 0.80, "L"]
   ], [
-    pitcher("선발 류현진", 105, 0.86, ["fastball", "change", "curve", "cutter"], "L"),
-    pitcher("중간 김광현", 45, 0.78, ["fastball", "slider", "twoseam"], "L"),
-    pitcher("중간 고우석", 40, 0.72, ["fastball", "fork", "curve"], "R"),
-    pitcher("마무리 오승환", 38, 0.83, ["fastball", "slider", "change"], "R")
+    pitcher("선발 류현진", 105, 0.86, ["fastball", "change", "curve", "cutter"], "L", "overhand"),
+    pitcher("사이드암 임창용", 45, 0.76, ["fastball", "slider", "twoseam"], "R", "sidearm"),
+    pitcher("언더핸드 정대현", 42, 0.80, ["twoseam", "fork", "curve", "change"], "R", "submarine"),
+    pitcher("마무리 오승환", 38, 0.83, ["fastball", "slider", "change"], "R", "threequarter")
   ]);
 
   const AWAY_TEAM = makeTeam("부산 웨이브", "BUS", "#9e2733", "#2c0a10", [
@@ -120,10 +128,10 @@
     ["신재혁", 0.71, 0.93, 0.42, "R"], ["문태양", 0.75, 0.72, 0.58, "L"], ["배승민", 0.70, 0.68, 0.62, "R"],
     ["노건우", 0.68, 0.60, 0.66, "L"], ["황인성", 0.65, 0.52, 0.74, "R"], ["구민재", 0.63, 0.44, 0.82, "R"]
   ], [
-    pitcher("선발 페냐", 100, 0.82, ["fastball", "slider", "curve", "change"], "R"),
-    pitcher("중간 이영하", 44, 0.74, ["fastball", "fork", "twoseam"], "R"),
-    pitcher("중간 박세웅", 42, 0.76, ["fastball", "curve", "change"], "R"),
-    pitcher("마무리 김원중", 36, 0.80, ["fastball", "slider", "fork"], "L")
+    pitcher("선발 페냐", 100, 0.82, ["fastball", "slider", "curve", "change"], "R", "overhand"),
+    pitcher("사이드암 이영하", 44, 0.74, ["fastball", "fork", "twoseam"], "R", "sidearm"),
+    pitcher("중간 박세웅", 42, 0.76, ["fastball", "curve", "change"], "R", "threequarter"),
+    pitcher("마무리 김원중", 36, 0.80, ["fastball", "slider", "fork"], "L", "overhand")
   ]);
 
   // ===================== 수비 위치 =====================
@@ -326,12 +334,22 @@
   function staminaRatio(p) { return clamp(p.stamina / p.max, 0, 1); }
 
   // 좌우 관련 도우미
+  const SHOULDER = { x: 8, y: -72 }, ARM_LEN = 30;
+  function handOffset(angle) {
+    return { x: SHOULDER.x + Math.cos(angle) * ARM_LEN, y: SHOULDER.y + Math.sin(angle) * ARM_LEN };
+  }
   function releasePoint(p) {
-    // 포수 시점: 나를 마주 본 투수의 오른팔은 화면 왼쪽(3루 쪽)에 있다
-    return { x: p.hand === "R" ? 2 * HOME.x - RELEASE.x : RELEASE.x, y: RELEASE.y };
+    // 실제로 그려지는 손 위치에서 공이 나가도록 계산
+    const mp = fieldPos(MOUND_DISTANCE, 0);
+    const h = handOffset(armSlot(p).angle);
+    const sign = p.hand === "R" ? -1 : 1;     // 포수 시점: 우완의 팔은 화면 왼쪽
+    return { x: mp.x + sign * h.x, y: mp.y + 4 + h.y };
   }
   // 같은 손 대결이면 타자가 불리 (공이 등 뒤에서 들어오고 변화구가 도망간다)
-  function platoonFactor(b, p) { return b.hand === p.hand ? 0.9 : 1.08; }
+  function platoonFactor(b, p) {
+    // 같은 손 대결은 타자가 불리하고, 사이드암·언더핸드면 더 까다롭다
+    return b.hand === p.hand ? 0.9 * armSlot(p).platoon : 1.08;
+  }
 
   // 현재 투수의 제구 흔들림 반경(px) — 조준 원과 실제 흔들림이 같은 값을 쓴다
   function controlSigma(p) {
@@ -347,7 +365,8 @@
     const fx = aim.x + gauss(sigma);
     const fy = aim.y + gauss(sigma * 0.9);
 
-    const sp = type.speed[0] + Math.random() * (type.speed[1] - type.speed[0]) - (1 - sr) * 9;
+    const slot = armSlot(p);
+    const sp = type.speed[0] + Math.random() * (type.speed[1] - type.speed[0]) - (1 - sr) * 9 + slot.speed;
     const flight = (MOUND_DISTANCE / (sp / 3.6)) * 1000 * TIME_SCALE;
 
     // 체력 소모: 주자가 많을수록 빨리 닳음
@@ -362,7 +381,7 @@
       type: type, speed: Math.round(sp), flight: flight, elapsed: 0,
       fx: fx, fy: fy, aim: aim, swung: false, swingAt: cpuBatterSwing,
       staminaAtThrow: sr, rx: rp.x, ry: rp.y,
-      bx: type.bx * (p.hand === "L" ? -1 : 1), by: type.by, hand: p.hand
+      bx: type.bx * slot.bx * (p.hand === "L" ? -1 : 1), by: type.by * slot.by, hand: p.hand
     };
     cpuStealDecision();
     ui.message = "";
@@ -467,6 +486,7 @@
     out.reach = bestT;
 
     const bat = currentBatter();
+    out.runTime = 4.55 - bat.speed * 1.0;      // 타자 주자가 1루까지 걸리는 시간
     if (!grounder) {
       if (bestT <= hang - 0.1) {
         out.kind = c.angle >= 22 ? "flyout" : "lineout";
@@ -500,8 +520,7 @@
       }
     });
 
-    const b = bat;
-    const runTime = 4.55 - b.speed * 1.0;   // 주력에 따라 1루까지 3.65~4.15초
+    const runTime = out.runTime;
 
     if (!handler) {
       out.kind = "single";
@@ -516,6 +535,8 @@
     const fp = polar(handler.dist, handler.ang);
     const throwDist = Math.hypot(fp.x - polar(27.4, 45).x, fp.y - polar(27.4, 45).y);
     const total = handleT + 0.75 + throwDist / 28;   // 포구 후 송구 동작 + 송구 비행
+    out.fieldAt = handleT + 0.45;                    // 야수가 공을 잡는 시점
+    out.throwAt = total;                             // 송구가 1루에 닿는 시점
 
     if (Math.random() < 0.03) {
       out.kind = "error"; out.text = "실책! (" + POS_NAME[handler.pos] + ")";
@@ -803,11 +824,23 @@
     anim.contact = c;
     anim.batted = res;
     const throwPlay = !!res.throwPlay;
-    const seg1 = res.grounder ? 700 + res.distance * 10 : 1000 + res.distance * 13;
+    const TIME_ZOOM = 0.52;                 // 실제 초 → 애니메이션 (비율은 그대로)
+    let endSec, splitT, arriveT, runT;
+    if (throwPlay) {
+      // 송구 도착과 주자 도착 순서가 판정과 정확히 일치하도록 같은 시계를 쓴다
+      endSec = Math.max(res.throwAt, res.runTime) + 0.4;
+      splitT = res.fieldAt / endSec;
+      arriveT = res.throwAt / endSec;
+      runT = res.runTime / endSec;
+    } else {
+      endSec = Math.max(res.hang || 1.2, 1.1) + 0.3;
+      splitT = 1; arriveT = 1;
+      runT = Math.min(1, res.runTime / endSec);
+    }
     anim.ballFlight = {
       t: 0,
-      dur: seg1 + (throwPlay ? 520 : 0),
-      splitT: throwPlay ? seg1 / (seg1 + 520) : 1,
+      dur: endSec * 1000 * TIME_ZOOM,
+      splitT: splitT, arriveT: arriveT, runT: runT,
       dist: res.distance, spray: res.spray, angle: res.angle,
       caught: !!res.caught,
       throwPlay: throwPlay,
@@ -910,12 +943,12 @@
     const f = anim.ballFlight;
     if (f.throwPlay && t > f.splitT) {
       // 야수 → 1루 송구
-      const u = (t - f.splitT) / (1 - f.splitT);
+      const u = clamp((t - f.splitT) / Math.max(0.01, f.arriveT - f.splitT), 0, 1);
       const a = fieldPos(f.fieldD, f.fieldAng), b = fieldPos(27.4, 45);
       return {
         x: a.x + (b.x - a.x) * u,
         y: a.y + (b.y - a.y) * u - Math.sin(u * Math.PI) * 30,
-        r: 5.5, d: f.dist, throwing: true
+        r: 5.5, d: f.dist, throwing: u < 1
       };
     }
     const u = f.throwPlay ? t / f.splitT : t;
@@ -1206,48 +1239,148 @@
     });
   }
 
+  // 두 마디로 굽은 팔/다리 (무릎·팔꿈치를 자동으로 잡아준다)
+  function limb(ax, ay, bx, by, bend, width, color) {
+    const mx = (ax + bx) / 2, my = (ay + by) / 2;
+    const dx = bx - ax, dy = by - ay;
+    const len = Math.hypot(dx, dy) || 1;
+    const kx = mx - dy / len * bend, ky = my + dx / len * bend;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = "rgba(0,0,0,0.42)";
+    ctx.lineWidth = width + 3;
+    ctx.beginPath();
+    ctx.moveTo(ax, ay);
+    ctx.quadraticCurveTo(kx, ky, bx, by);
+    ctx.stroke();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    ctx.moveTo(ax, ay);
+    ctx.quadraticCurveTo(kx, ky, bx, by);
+    ctx.stroke();
+    return { x: kx, y: ky };
+  }
+
+  // 와인드업 → 다리 들기 → 스트라이드 → 릴리스 → 팔로스루
+  function armAngleAt(w, f, slot) {
+    if (w < 0.32) return slot + 3.5;
+    if (w < 0.68) { const u = (w - 0.32) / 0.36; return slot + 3.5 - 1.2 * u; }
+    if (w < 1) { const u = (w - 0.68) / 0.32; return slot + 2.3 - 2.3 * Math.pow(u, 0.65); }
+    return slot - 1.15 * Math.pow(f, 0.6);
+  }
+
   function drawPitcherFigure() {
     const t = fieldingTeam();
+    const p = currentPitcher();
+    const slot = armSlot(p);
     const mp = fieldPos(MOUND_DISTANCE, 0);
-    const x = mp.x, feet = mp.y + 4;
     const ph = anim.phase;
-    const wind = ph === "wind" ? Math.min(1, anim.time / anim.dur) : (ph === "aim" || ph === "set" ? 0 : 1);
+
+    let w = 0, f = 0;
+    if (ph === "wind") w = Math.min(1, anim.time / Math.max(1, anim.dur));
+    else if (ph === "aim" || ph === "set" || ph === "half-start" || ph === "half-end" || ph === "title") w = 0;
+    else { w = 1; f = Math.min(1, (anim.pitch ? anim.pitch.elapsed : anim.time) / 450); }
+
+    // 동작 파라미터
+    const lift = w < 0.42 ? Math.sin(w / 0.42 * Math.PI * 0.5) : Math.max(0, 1 - (w - 0.42) / 0.22);
+    const stride = clamp((w - 0.45) / 0.45, 0, 1);
+    const lean = clamp((w - 0.6) / 0.4, 0, 1) * 0.5 + f * 0.5;
+    const finish = f;
 
     ctx.save();
-    ctx.translate(x, feet);
-    if (currentPitcher().hand === "R") ctx.scale(-1, 1);              // 우완은 화면 왼쪽 팔로 반전
-    ctx.beginPath(); ctx.fillStyle = "rgba(0,0,0,0.2)";
-    ctx.ellipse(0, 2, 22, 6, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.translate(mp.x, mp.y + 4 + stride * 3);
+    if (p.hand === "R") ctx.scale(-1, 1);
+    ctx.scale(1 + stride * 0.05, 1 + stride * 0.05);
 
-    const hip = -38, shoulder = -70, headY = -86;
-    const lift = Math.sin(Math.min(wind, 0.55) / 0.55 * Math.PI) * (wind < 0.65 ? 1 : 0);
-    const stride = wind > 0.55 ? Math.min(1, (wind - 0.55) / 0.45) : 0;
-
-    ctx.strokeStyle = t.pants; ctx.lineWidth = 8; ctx.lineCap = "round";
-    ctx.beginPath(); ctx.moveTo(0, hip); ctx.lineTo(-5 - stride * 16, 0); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(0, hip);
-    if (lift > 0.15) ctx.lineTo(9 + lift * 8, hip - lift * 18); else ctx.lineTo(7 + stride * 16, 0);
-    ctx.stroke();
-
-    roundRect(-13, shoulder, 26, -shoulder + hip, 7, t.color, "rgba(0,0,0,0.5)");
-    ctx.fillStyle = t.dark;
-    ctx.fillRect(-13, shoulder + 3, 26, 4);
-
-    const armAngle = -2.6 + wind * 2.2;
-    ctx.strokeStyle = t.color; ctx.lineWidth = 7;
+    // 그림자
     ctx.beginPath();
-    ctx.moveTo(0, shoulder + 7);
-    ctx.lineTo(Math.cos(armAngle) * 26, shoulder + 7 + Math.sin(armAngle) * 26);
-    ctx.stroke();
-    ctx.beginPath(); ctx.fillStyle = "#7b4b2a";
-    ctx.arc(-16 + stride * 5, shoulder + 14, 7, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "rgba(0,0,0,0.22)";
+    ctx.ellipse(-2, 2, 24, 6.5, 0, 0, Math.PI * 2);
+    ctx.fill();
 
-    ctx.beginPath(); ctx.fillStyle = "#e8b88f";
-    ctx.arc(0, headY, 10, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.fillStyle = t.dark;
-    ctx.arc(0, headY - 2, 10.5, Math.PI, 0); ctx.fill();
-    ctx.fillRect(-10.5, headY - 3, 21, 3.5);
-    ctx.fillRect(-11.5, headY - 3, 6, 2.5);
+    const hip = { x: stride * 5 - finish * 2, y: -40 + lift * 2 + lean * 3 };
+    const shoulder = { x: SHOULDER.x * 0.4 + lean * 4, y: -72 + lean * 5 };
+    const headPos = { x: shoulder.x + lean * 5, y: shoulder.y - 15 };
+
+    // 뒷다리(축발): 러버를 밀고 팔로스루에서 들린다
+    const backFoot = { x: -8 - finish * 4, y: -finish * 26 };
+    limb(hip.x, hip.y, backFoot.x, backFoot.y, 7 + lift * 4, 9, t.pants);
+
+    // 앞다리: 들었다가 홈 쪽(화면 아래)으로 내딛는다
+    const frontFoot = lift > 0.05 && stride < 0.05
+      ? { x: 14 + lift * 4, y: -34 - lift * 20 }
+      : { x: -12 - stride * 14, y: stride * 8 };
+    limb(hip.x, hip.y, frontFoot.x, frontFoot.y, lift > 0.05 && stride < 0.05 ? -14 : -6, 9, t.pants);
+
+    // 신발
+    function shoe(fx, fy, ang) {
+      ctx.save();
+      ctx.translate(fx, fy);
+      ctx.rotate(ang);
+      roundRect(-7, -4, 16, 8, 3, "#22272b");
+      ctx.restore();
+    }
+    shoe(backFoot.x, backFoot.y, finish > 0.1 ? -0.9 : 0);
+    shoe(frontFoot.x, frontFoot.y, lift > 0.3 && stride < 0.05 ? -1.1 : 0.1);
+
+    // 몸통
+    ctx.save();
+    ctx.translate(hip.x, hip.y);
+    ctx.rotate(lean * 0.22);
+    roundRect(-13, shoulder.y - hip.y, 26, hip.y - shoulder.y + 6, 7, t.color, "rgba(0,0,0,0.45)");
+    ctx.fillStyle = t.dark;
+    ctx.fillRect(-13, shoulder.y - hip.y + 4, 26, 4);
+    ctx.restore();
+
+    // 글러브 팔
+    const gloveX = -10 - w * 8 + finish * 12, gloveY = shoulder.y + 8 + w * 6 + finish * 6;
+    limb(-SHOULDER.x * 0.6 + shoulder.x, shoulder.y + 4, gloveX, gloveY, 6, 7, t.color);
+    ctx.beginPath();
+    ctx.fillStyle = "#7b4b2a";
+    ctx.arc(gloveX, gloveY, 7, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 머리 + 모자
+    ctx.beginPath();
+    ctx.fillStyle = "#e8b88f";
+    ctx.arc(headPos.x, headPos.y, 10, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.fillStyle = t.dark;
+    ctx.arc(headPos.x, headPos.y - 2, 10.5, Math.PI, 0);
+    ctx.fill();
+    ctx.fillRect(headPos.x - 10.5, headPos.y - 3, 21, 3.5);
+    ctx.fillRect(headPos.x - 11.5, headPos.y - 3, 6, 2.5);
+
+    // 던지는 팔 (암슬롯에 따라 궤도가 달라진다)
+    const ang = armAngleAt(w, f, slot.angle);
+    const hand = {
+      x: SHOULDER.x + shoulder.x * 0.3 + Math.cos(ang) * ARM_LEN,
+      y: shoulder.y + 2 + Math.sin(ang) * ARM_LEN
+    };
+    limb(SHOULDER.x + shoulder.x * 0.3, shoulder.y + 2, hand.x, hand.y,
+      slot.angle > 0 ? 9 : -9, 7.5, t.color);
+    // 손
+    ctx.beginPath();
+    ctx.fillStyle = "#e8b88f";
+    ctx.strokeStyle = "rgba(0,0,0,0.35)";
+    ctx.lineWidth = 1.2;
+    ctx.arc(hand.x, hand.y, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    // 릴리스 전에는 공이 손에 들려 있다
+    if (w < 1) {
+      ctx.beginPath();
+      ctx.fillStyle = "#fdfdfd";
+      ctx.strokeStyle = "rgba(0,0,0,0.35)";
+      ctx.lineWidth = 1.2;
+      ctx.arc(hand.x, hand.y, 4.6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+
     ctx.restore();
   }
 
@@ -1343,7 +1476,10 @@
   }
   const RUNNER_TARGET = { homerun: 4, triple: 3, double: 2, single: 1, error: 1, walk: 1 };
   function batterRunnerProgress() {
-    if (anim.phase === "flight" && anim.ballFlight) return Math.min(1, anim.ballFlight.t * 1.15);
+    if (anim.phase === "flight" && anim.ballFlight) {
+      const f = anim.ballFlight;
+      return Math.min(1, f.t / Math.max(0.05, f.runT));   // 실제 주루 시간에 맞춰 달린다
+    }
     if (anim.phase === "play" && anim.play) {
       if (anim.play.res.kind === "strikeout") return null;
       const tgt = RUNNER_TARGET[anim.play.res.kind] || 1;
@@ -1624,8 +1760,8 @@
     ctx.fillText(p.name, x + 14, y + 26);
     ctx.font = "11px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
     ctx.fillStyle = "#9fb0bd";
-    ctx.fillText((p.hand === "L" ? "좌완" : "우완") + "  투구수 " + p.pitches +
-                 "  제구 " + Math.round(p.control * 100), x + 14, y + 44);
+    ctx.fillText((p.hand === "L" ? "좌완" : "우완") + " " + armSlot(p).name +
+                 "   투구수 " + p.pitches, x + 14, y + 44);
 
     const sr = staminaRatio(p);
     roundRect(x + 14, y + 54, w - 28, 12, 6, "rgba(255,255,255,0.15)");
