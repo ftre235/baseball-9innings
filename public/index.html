@@ -157,7 +157,7 @@
     });
     game = {
       inning: 1, half: "top", outs: 0, balls: 0, strikes: 0,
-      bases: [null, null, null], steal: null,
+      bases: [null, null, null], steals: [], pitchLog: [],
       lines: { away: [], home: [] },
       runs: { away: 0, home: 0 },
       hits: { away: 0, home: 0 },
@@ -174,51 +174,85 @@
   function currentBatter() { const t = battingTeam(); return t.lineup[t.order]; }
   function runnersOn() { return game.bases.filter(function (b) { return b; }).length; }
 
-  // 도루: 다음 베이스가 비어 있는 1루/2루 주자만 시도 가능
-  function stealableBase() {
-    if (game.bases[1] && !game.bases[2]) return 1;
-    if (game.bases[0] && !game.bases[1]) return 0;
-    return null;
+  // 도루: 다음 베이스가 빈 1루/2루 주자를 각자 따로 보낼 수 있다
+  function stealSuccessRate(runner, from) {
+    // 3루 도루는 송구 거리가 짧아 더 어렵다
+    const base = 0.2 + runner.p.speed * 0.62 - (from === 1 ? 0.08 : 0);
+    return clamp(base, 0.15, 0.88);
   }
-  function trySteal() {
-    if (userIsPitching() || game.steal) return false;
+  function stealCandidates() {
+    const list = [];
+    // 앞 주자가 뛰면 뒤 주자도 따라 뛸 수 있다 (더블 스틸)
+    for (let i = 1; i >= 0; i--) {
+      const r = game.bases[i];
+      if (!r) continue;
+      const nextFree = !game.bases[i + 1] || (i + 1 <= 1 && isStealing(i + 1));
+      if (nextFree) list.push({ from: i, runner: r, rate: stealSuccessRate(r, i) });
+    }
+    return list.reverse();
+  }
+  function isStealing(from) {
+    return game.steals.some(function (st) { return st.from === from; });
+  }
+  function toggleSteal(from) {
+    if (userIsPitching()) return false;
     if (["set", "wind", "pitch"].indexOf(anim.phase) < 0) return false;
-    const from = stealableBase();
-    if (from === null) return false;
-    game.steal = { from: from, runner: game.bases[from] };
-    ui.message = game.bases[from].p.name + " 도루 시도!";
+    const idx = game.steals.findIndex(function (st) { return st.from === from; });
+    if (idx >= 0) { game.steals.splice(idx, 1); return true; }
+    const r = game.bases[from];
+    if (!r) return false;
+    // 다음 베이스가 비었거나, 앞 주자도 함께 뛰는 경우(더블 스틸)만 가능
+    if (game.bases[from + 1] && !(from + 1 <= 1 && isStealing(from + 1))) return false;
+    game.steals.push({ from: from, runner: r });
+    ui.message = r.p.name + " 도루 시도!";
     return true;
   }
-  function cpuStealDecision() {
-    if (!userIsPitching() || game.steal) return;
-    const from = stealableBase();
-    if (from === null) return;
-    const r = game.bases[from];
-    const chance = Math.max(0, r.p.speed - 0.62) * 0.45;    // 발 빠른 주자만 노린다
-    if (Math.random() < chance) game.steal = { from: from, runner: r };
+  function trySteal() {
+    const c = stealCandidates();
+    if (!c.length) return false;
+    return toggleSteal(c[c.length - 1].from);     // S 키: 선행 주자부터
   }
-  function resolveSteal() {
-    if (!game.steal) return null;
-    const st = game.steal;
-    game.steal = null;
-    const r = st.runner;
-    if (game.bases[st.from] !== r) return null;              // 사이에 상황이 바뀌면 무효
-    const prob = clamp(0.2 + r.p.speed * 0.62, 0.2, 0.88);
-    const ok = Math.random() < prob;
-    game.bases[st.from] = null;
-    if (ok) {
-      game.bases[st.from + 1] = r;
-      r.p.sb++;
-      return { ok: true, runner: r, from: st.from + 1, to: st.from + 2, text: r.p.name + " 도루 성공!" };
-    }
-    game.outs++;
-    r.p.cs++;
-    return { ok: false, runner: r, from: st.from + 1, to: st.from + 1, text: r.p.name + " 도루 실패 · 아웃" };
+  function cpuStealDecision() {
+    if (!userIsPitching() || game.steals.length) return;
+    stealCandidates().forEach(function (c) {
+      const chance = Math.max(0, c.runner.p.speed - 0.62) * 0.45;
+      if (Math.random() < chance) game.steals.push({ from: c.from, runner: c.runner });
+    });
+  }
+  function resolveSteals() {
+    if (!game.steals.length) return null;
+    // 선행 주자부터 처리해야 뒤 주자가 들어갈 자리가 생긴다
+    const list = game.steals.slice().sort(function (a, b) { return b.from - a.from; });
+    game.steals = [];
+    const results = [];
+    list.forEach(function (st) {
+      const r = st.runner;
+      if (game.bases[st.from] !== r || game.bases[st.from + 1]) return;   // 상황이 바뀌면 무효
+      const ok = Math.random() < stealSuccessRate(r, st.from);
+      game.bases[st.from] = null;
+      if (ok) {
+        game.bases[st.from + 1] = r;
+        r.p.sb++;
+        results.push({ ok: true, runner: r, from: st.from + 1, to: st.from + 2,
+          text: r.p.name + " " + (st.from === 0 ? "2루" : "3루") + " 도루 성공!" });
+      } else {
+        game.outs++;
+        r.p.cs++;
+        results.push({ ok: false, runner: r, from: st.from + 1, to: st.from + 1,
+          text: r.p.name + " 도루 실패 · 아웃" });
+      }
+    });
+    if (!results.length) return null;
+    return {
+      list: results,
+      ok: results.every(function (x) { return x.ok; }),
+      text: results.map(function (x) { return x.text; }).join("   ")
+    };
   }
 
   function startHalf() {
     game.outs = 0; game.balls = 0; game.strikes = 0;
-    game.bases = [null, null, null]; game.steal = null;
+    game.bases = [null, null, null]; game.steals = [];
     const key = game.half === "top" ? "away" : "home";
     while (game.lines[key].length < game.inning - 1) game.lines[key].push(0);
     game.lines[key][game.inning - 1] = 0;
@@ -299,13 +333,17 @@
   // 같은 손 대결이면 타자가 불리 (공이 등 뒤에서 들어오고 변화구가 도망간다)
   function platoonFactor(b, p) { return b.hand === p.hand ? 0.9 : 1.08; }
 
+  // 현재 투수의 제구 흔들림 반경(px) — 조준 원과 실제 흔들림이 같은 값을 쓴다
+  function controlSigma(p) {
+    return (1 - p.control) * 34 + (1 - staminaRatio(p)) * 40 + 5;
+  }
+
   function throwPitch(typeKey, aim) {
     const p = currentPitcher();
     const type = PITCH_TYPES[typeKey];
     const sr = staminaRatio(p);
 
-    // 체력/제구에 따른 흔들림
-    const sigma = (1 - p.control) * 34 + (1 - sr) * 40 + 5;
+    const sigma = controlSigma(p);
     const fx = aim.x + gauss(sigma);
     const fy = aim.y + gauss(sigma * 0.9);
 
@@ -433,6 +471,7 @@
       if (bestT <= hang - 0.1) {
         out.kind = c.angle >= 22 ? "flyout" : "lineout";
         out.text = (c.angle >= 22 ? "뜬공 아웃" : "직선타 아웃") + " (" + POS_NAME[out.fielder] + ")";
+        out.caught = true;
         return out;
       }
       if (dist >= 76 && bestT > hang + 0.35 && bat.speed > 0.6 && Math.abs(c.spray) > 10) {
@@ -472,6 +511,8 @@
     }
 
     out.fielder = handler.pos;
+    out.fieldSpot = { d: handler.dist, ang: handler.ang };
+    out.throwPlay = true;
     const fp = polar(handler.dist, handler.ang);
     const throwDist = Math.hypot(fp.x - polar(27.4, 45).x, fp.y - polar(27.4, 45).y);
     const total = handleT + 0.75 + throwDist / 28;   // 포구 후 송구 동작 + 송구 비행
@@ -667,6 +708,7 @@
     anim.batSwing = 0;
     anim.pitch = null;
     anim.play = null;
+    game.pitchLog = [];
     cam.tx = W / 2; cam.ty = H / 2; cam.tscale = 1;
 
     ui.message = "";
@@ -683,7 +725,7 @@
   // 투구 결과 처리 (스윙/견제 없이 포수 미트까지 간 경우 포함)
   function finishPitch(kindHint) {
     anim.pendingCount = kindHint;
-    const st = resolveSteal();
+    const st = resolveSteals();
     if (st) {
       anim.stealResult = st;
       setPhase("steal", 1200);
@@ -701,9 +743,10 @@
     if (kindHint === "swing-miss") {
       game.strikes++;
       ui.message = "헛스윙";
+      logPitch(loc, "swing");
     } else if (kindHint === "take") {
-      if (strike) { game.strikes++; ui.message = "스트라이크"; }
-      else { game.balls++; ui.message = "볼"; }
+      if (strike) { game.strikes++; ui.message = "스트라이크"; logPitch(loc, "strike"); }
+      else { game.balls++; ui.message = "볼"; logPitch(loc, "ball"); }
     }
 
     if (game.strikes >= 3) {
@@ -725,9 +768,14 @@
     else setPhase("set", 650);
   }
 
+  function logPitch(loc, call) {
+    game.pitchLog.push({ x: loc.x, y: loc.y, call: call, n: game.pitchLog.length + 1 });
+    if (game.pitchLog.length > 8) game.pitchLog.shift();
+  }
+
   function doSwing(offsetMs) {
     const pt = anim.pitch;
-    game.steal = null;
+    game.steals = [];
     pt.swung = true;
     anim.batSwing = 0.0001;
     const b = currentBatter();
@@ -742,21 +790,30 @@
     if (res.kind === "foul") {
       if (game.strikes < 2) game.strikes++;
       ui.message = "파울";
+      logPitch({ x: pt.fx, y: pt.fy }, "foul");
       anim.contact = c;
       flash = 1; shake = 4;
       setPhase("foul", 900);
       return;
     }
 
+    logPitch({ x: pt.fx, y: pt.fy }, "hit");
     flash = 1;
     shake = res.kind === "homerun" ? 12 : 6;
     anim.contact = c;
     anim.batted = res;
+    const throwPlay = !!res.throwPlay;
+    const seg1 = res.grounder ? 700 + res.distance * 10 : 1000 + res.distance * 13;
     anim.ballFlight = {
       t: 0,
-      dur: res.grounder ? 900 + res.distance * 14 : 1000 + res.distance * 13,
+      dur: seg1 + (throwPlay ? 520 : 0),
+      splitT: throwPlay ? seg1 / (seg1 + 520) : 1,
       dist: res.distance, spray: res.spray, angle: res.angle,
-      peak: res.grounder ? 1.5 : Math.max(2, res.distance * Math.tan(Math.max(8, res.angle) * Math.PI / 180) / 4)
+      caught: !!res.caught,
+      throwPlay: throwPlay,
+      fieldD: res.fieldSpot ? res.fieldSpot.d : res.distance,
+      fieldAng: res.fieldSpot ? res.fieldSpot.ang : res.spray,
+      peak: res.grounder ? 1.2 : Math.max(2, res.distance * Math.tan(Math.max(8, res.angle) * Math.PI / 180) / 4)
     };
     anim.fielderAnim = POSITIONS.map(function (f) { return { pos: f.pos, ang: f.ang, dist: f.dist, t: 0 }; });
     setPhase("flight", 0);
@@ -851,10 +908,23 @@
 
   function battedBallScreen(t) {
     const f = anim.ballFlight;
-    const d = f.dist * t;
-    const h = f.peak * 4 * t * (1 - t);
-    const pos = fieldPos(d, f.spray);
-    return { x: pos.x, y: pos.y - h * pxPerM(d) * 0.55, r: Math.max(2.5, 13 - 10 * t), d: d };
+    if (f.throwPlay && t > f.splitT) {
+      // 야수 → 1루 송구
+      const u = (t - f.splitT) / (1 - f.splitT);
+      const a = fieldPos(f.fieldD, f.fieldAng), b = fieldPos(27.4, 45);
+      return {
+        x: a.x + (b.x - a.x) * u,
+        y: a.y + (b.y - a.y) * u - Math.sin(u * Math.PI) * 30,
+        r: 5.5, d: f.dist, throwing: true
+      };
+    }
+    const u = f.throwPlay ? t / f.splitT : t;
+    const d = (f.throwPlay ? f.fieldD : f.dist) * u;
+    const ang = f.throwPlay ? f.spray + (f.fieldAng - f.spray) * u : f.spray;
+    // 잡히는 타구는 글러브 높이에서 멈춘다
+    const h = f.peak * 4 * u * (1 - u) + (f.caught ? 1.7 * u : 0);
+    const pos = fieldPos(d, ang);
+    return { x: pos.x, y: pos.y - h * pxPerM(d) * 0.55, r: Math.max(2.5, 13 - 10 * u), d: d };
   }
 
   // ===================== 입력 =====================
@@ -896,7 +966,8 @@
       return;
     }
 
-    if (stealButtonHit(pt)) { trySteal(); return; }
+    const sb = stealButtonHit(pt);
+    if (sb !== null) { toggleSteal(sb); return; }
 
     if (anim.phase === "pitch" && !userIsPitching() && anim.pitch && !anim.pitch.swung) {
       doSwing(anim.pitch.elapsed - anim.pitch.flight);
@@ -1119,10 +1190,11 @@
       let d = f.dist, ang = f.ang;
       if (list && anim.phase === "flight" && anim.ballFlight) {
         const fa = list[i];
-        const land = polar(anim.ballFlight.dist, anim.ballFlight.spray);
+        const bf = anim.ballFlight;
+        const land = bf.throwPlay ? polar(bf.fieldD, bf.fieldAng) : polar(bf.dist, bf.spray);
         const fp = polar(f.dist, f.ang);
         // 타구를 처리하는 야수만 실제로 쫓아간다
-        const chase = (anim.batted && anim.batted.fielder === f.pos) ? 0.95 : 0.14;
+        const chase = (anim.batted && anim.batted.fielder === f.pos) ? 1.0 : 0.14;
         const nx = fp.x + (land.x - fp.x) * fa.t * chase;
         const ny = fp.y + (land.y - fp.y) * fa.t * chase;
         d = Math.hypot(nx, ny);
@@ -1297,16 +1369,18 @@
     }
     if (anim.phase === "steal" && anim.stealResult) {
       const prog = Math.min(1, anim.time / 700);
-      const st = anim.stealResult;
+      const movers = anim.stealResult.list.map(function (x) { return x.runner; });
       game.bases.forEach(function (r, i) {
-        if (r && r !== st.runner) drawRunnerAt(i + 1 + 0.05, t);
+        if (r && movers.indexOf(r) < 0) drawRunnerAt(i + 1 + 0.05, t);
       });
-      drawRunnerAt(st.from + (st.to - st.from) * prog, t);
+      anim.stealResult.list.forEach(function (x) {
+        drawRunnerAt(x.from + (x.to - x.from) * prog, t);
+      });
       return;
     }
     // 평소: 베이스에서 리드오프
     game.bases.forEach(function (r, i) {
-      if (r) drawRunnerAt(i + 1 + (game.steal && game.steal.runner === r ? 0.14 : 0.06), t);
+      if (r) drawRunnerAt(i + 1 + (isStealing(i) ? 0.14 : 0.06), t);
     });
     const bp = batterRunnerProgress();
     if (bp !== null) drawRunnerAt(bp, t);
@@ -1343,16 +1417,45 @@
         ctx.stroke();
       }
       if (ui.hoverZone) {
+        const sg = controlSigma(currentPitcher());
+        // 제구 흔들림 범위: 체력이 떨어질수록 커진다
+        ctx.beginPath();
+        ctx.fillStyle = "rgba(255,213,79,0.10)";
+        ctx.arc(ui.hoverZone.x, ui.hoverZone.y, sg * 1.6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.strokeStyle = "rgba(255,213,79,0.45)"; ctx.lineWidth = 1.5;
+        ctx.setLineDash([5, 5]);
+        ctx.arc(ui.hoverZone.x, ui.hoverZone.y, sg * 1.6, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
         ctx.beginPath();
         ctx.strokeStyle = "#ffd54f"; ctx.lineWidth = 2;
-        ctx.arc(ui.hoverZone.x, ui.hoverZone.y, 13, 0, Math.PI * 2);
+        ctx.arc(ui.hoverZone.x, ui.hoverZone.y, 11, 0, Math.PI * 2);
         ctx.stroke();
         ctx.beginPath();
-        ctx.moveTo(ui.hoverZone.x - 20, ui.hoverZone.y); ctx.lineTo(ui.hoverZone.x + 20, ui.hoverZone.y);
-        ctx.moveTo(ui.hoverZone.x, ui.hoverZone.y - 20); ctx.lineTo(ui.hoverZone.x, ui.hoverZone.y + 20);
+        ctx.moveTo(ui.hoverZone.x - 18, ui.hoverZone.y); ctx.lineTo(ui.hoverZone.x + 18, ui.hoverZone.y);
+        ctx.moveTo(ui.hoverZone.x, ui.hoverZone.y - 18); ctx.lineTo(ui.hoverZone.x, ui.hoverZone.y + 18);
         ctx.stroke();
       }
     }
+
+    // 이번 타석 투구 기록
+    const CALL_COLOR = { strike: "#ffd54f", ball: "#64b5f6", foul: "#bdbdbd", swing: "#ff8a65", hit: "#ef5350" };
+    game.pitchLog.forEach(function (lg, i) {
+      const last = i === game.pitchLog.length - 1;
+      ctx.beginPath();
+      ctx.globalAlpha = last ? 1 : 0.55;
+      ctx.fillStyle = CALL_COLOR[lg.call] || "#fff";
+      ctx.arc(lg.x, lg.y, last ? 9 : 7, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(0,0,0,0.55)"; ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.fillStyle = "#12161b";
+      ctx.font = "bold 10px 'Trebuchet MS', sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(String(lg.n), lg.x, lg.y + 3.5);
+      ctx.globalAlpha = 1;
+    });
     ctx.restore();
   }
 
@@ -1381,7 +1484,7 @@
   function drawBattedBall() {
     const f = anim.ballFlight;
     const bp = battedBallScreen(f.t);
-    ctx.strokeStyle = "rgba(255,255,255,0.35)";
+    ctx.strokeStyle = bp.throwing ? "rgba(255,255,255,0.22)" : "rgba(255,255,255,0.35)";
     ctx.lineWidth = 2;
     ctx.beginPath();
     for (let i = 0; i <= 26; i++) {
@@ -1401,7 +1504,21 @@
     ctx.font = "bold 18px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
     ctx.fillStyle = "#fff";
     ctx.textAlign = "center";
-    ctx.fillText(Math.round(bp.d) + "m", bp.x, bp.y - bp.r - 12);
+    if (bp.throwing) {
+      ctx.fillText("1루 송구", bp.x, bp.y - bp.r - 12);
+    } else {
+      ctx.fillText(Math.round(bp.d) + "m", bp.x, bp.y - bp.r - 12);
+    }
+    // 포구 순간 반짝임
+    if (f.caught && f.t > 0.93) {
+      ctx.save();
+      ctx.globalAlpha = (f.t - 0.93) / 0.07;
+      const g2 = ctx.createRadialGradient(bp.x, bp.y, 2, bp.x, bp.y, 34);
+      g2.addColorStop(0, "#fff"); g2.addColorStop(1, "rgba(255,255,255,0)");
+      ctx.fillStyle = g2;
+      ctx.beginPath(); ctx.arc(bp.x, bp.y, 34, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
   }
 
   // ---------- HUD ----------
@@ -1485,8 +1602,10 @@
       const t = Math.min(1, anim.time / 900);
       anim.runnerAnim.forEach(function (r) { dot(r.from, r.to, t, r.out ? "#ef5350" : "#4fc3f7"); });
     } else if (anim.phase === "steal" && anim.stealResult) {
-      const st = anim.stealResult;
-      dot(st.from, st.to, Math.min(1, anim.time / 700), st.ok ? "#4fc3f7" : "#ef5350");
+      const pr = Math.min(1, anim.time / 700);
+      anim.stealResult.list.forEach(function (x) {
+        dot(x.from, x.to, pr, x.ok ? "#4fc3f7" : "#ef5350");
+      });
     }
 
     ctx.textAlign = "center";
@@ -1617,9 +1736,10 @@
     } else if (p === "foul") {
       title = "파울"; color = "#bdbdbd";
     } else if (p === "steal" && anim.stealResult) {
-      title = anim.stealResult.ok ? "도루 성공!" : "도루 실패";
-      sub = anim.stealResult.text;
-      color = anim.stealResult.ok ? "#4fc3f7" : "#ef5350";
+      const sr = anim.stealResult;
+      title = sr.list.length > 1 ? "더블 스틸!" : (sr.ok ? "도루 성공!" : "도루 실패");
+      sub = sr.text;
+      color = sr.ok ? "#4fc3f7" : "#ef5350";
     }
 
     if (!title) return;
@@ -1639,33 +1759,74 @@
     ctx.restore();
   }
 
-  const STEAL_BTN = { x: 24, y: H - 128, w: 190, h: 40 };
+  const BASE_LABEL = ["1루", "2루", "3루"];
+  function stealButtonRects() {
+    if (userIsPitching() || ["set", "wind", "pitch"].indexOf(anim.phase) < 0) return [];
+    const c = stealCandidates();
+    return c.map(function (cand, i) {
+      return { x: 24, y: H - 78 - (c.length - 1 - i) * 52, w: 252, h: 46, cand: cand };
+    });
+  }
   function stealButtonHit(pt) {
-    return !userIsPitching() && stealableBase() !== null &&
-      ["set", "wind", "pitch"].indexOf(anim.phase) >= 0 &&
-      pt.x >= STEAL_BTN.x && pt.x <= STEAL_BTN.x + STEAL_BTN.w &&
-      pt.y >= STEAL_BTN.y && pt.y <= STEAL_BTN.y + STEAL_BTN.h;
+    let hit = null;
+    stealButtonRects().forEach(function (r) {
+      if (pt.x >= r.x && pt.x <= r.x + r.w && pt.y >= r.y && pt.y <= r.y + r.h) hit = r.cand.from;
+    });
+    return hit;
   }
   function drawStealHint() {
-    if (userIsPitching()) return;
-    if (["set", "wind", "pitch"].indexOf(anim.phase) < 0) return;
-    if (stealableBase() === null) return;
-    const on = !!game.steal;
-    roundRect(STEAL_BTN.x, STEAL_BTN.y, STEAL_BTN.w, STEAL_BTN.h, 8,
-      on ? "rgba(26,115,232,0.85)" : "rgba(10,14,18,0.72)",
-      on ? "#64b5f6" : "rgba(255,255,255,0.25)");
-    ctx.textAlign = "center";
-    ctx.font = "bold 14px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
-    ctx.fillStyle = on ? "#fff" : "#ffd54f";
-    ctx.fillText(on ? "도루 시도 중!" : "S 키 · 클릭 → 도루", STEAL_BTN.x + STEAL_BTN.w / 2, STEAL_BTN.y + 26);
+    const rects = stealButtonRects();
+    if (!rects.length) return;
+    rects.forEach(function (r) {
+      const on = isStealing(r.cand.from);
+      const rate = Math.round(r.cand.rate * 100);
+      const col = rate >= 70 ? "#81c784" : (rate >= 55 ? "#ffd54f" : "#ef9a9a");
+      roundRect(r.x, r.y, r.w, r.h, 8, on ? "rgba(26,115,232,0.9)" : "rgba(10,14,18,0.78)",
+        on ? "#64b5f6" : "rgba(255,255,255,0.22)");
+      ctx.textAlign = "left";
+      ctx.font = "bold 13px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+      ctx.fillStyle = "#fff";
+      ctx.fillText(BASE_LABEL[r.cand.from] + " → " + BASE_LABEL[r.cand.from + 1] + "  " + r.cand.runner.p.name,
+        r.x + 12, r.y + 19);
+      ctx.font = "11px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+      ctx.fillStyle = on ? "#d7e8ff" : "#9fb0bd";
+      ctx.fillText("주력 " + Math.round(r.cand.runner.p.speed * 100) + "   성공률", r.x + 12, r.y + 36);
+      ctx.font = "bold 15px 'Trebuchet MS', sans-serif";
+      ctx.fillStyle = on ? "#fff" : col;
+      ctx.textAlign = "right";
+      ctx.fillText(rate + "%", r.x + r.w - 42, r.y + 37);
+      // 성공률 막대
+      roundRect(r.x + r.w - 34, r.y + 12, 22, 22, 4, "rgba(255,255,255,0.12)");
+      roundRect(r.x + r.w - 34, r.y + 34 - 22 * r.cand.rate, 22, 22 * r.cand.rate, 4, col);
+      ctx.textAlign = "left";
+      if (on) {
+        ctx.font = "bold 11px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+        ctx.fillStyle = "#fff";
+        ctx.fillText("GO!", r.x + r.w - 78, r.y + 19);
+      }
+    });
   }
 
   function drawMessage() {
     if (!ui.message) return;
+    // 볼/스트라이크 판정은 존 옆에 크게
+    const call = ["스트라이크", "볼", "헛스윙", "파울"].indexOf(ui.message) >= 0;
+    if (call && ["catch", "foul", "aim", "set"].indexOf(anim.phase) >= 0) {
+      const col = ui.message === "볼" ? "#64b5f6" : (ui.message === "스트라이크" ? "#ffd54f" : "#ff8a65");
+      const x = ZONE.x + ZONE.w + 26, y = ZONE.y + 34;
+      ctx.textAlign = "left";
+      ctx.font = "bold 26px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = "rgba(8,11,15,0.85)";
+      ctx.strokeText(ui.message, x, y);
+      ctx.fillStyle = col;
+      ctx.fillText(ui.message, x, y);
+      return;
+    }
     ctx.textAlign = "center";
     ctx.font = "bold 18px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
     ctx.fillStyle = "rgba(255,255,255,0.9)";
-    ctx.fillText(ui.message, W / 2, H - 92);
+    ctx.fillText(ui.message, W / 2, H - 150);
   }
 
   function drawPitchInfo() {
@@ -1853,7 +2014,7 @@
   // ===================== 초기화 =====================
   anim = { phase: "title", time: 0, dur: 0, batSwing: 0, pitch: null, play: null };
   game = {
-    inning: 1, half: "top", outs: 0, balls: 0, strikes: 0, bases: [null, null, null], steal: null,
+    inning: 1, half: "top", outs: 0, balls: 0, strikes: 0, bases: [null, null, null], steals: [], pitchLog: [],
     lines: { away: [], home: [] }, runs: { away: 0, home: 0 }, hits: { away: 0, home: 0 },
     errors: { away: 0, home: 0 }, over: false, walkoff: false, log: []
   };
