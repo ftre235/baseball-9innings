@@ -293,9 +293,9 @@
 
   // 좌우 관련 도우미
   function releasePoint(p) {
-    return { x: p.hand === "L" ? 2 * HOME.x - RELEASE.x : RELEASE.x, y: RELEASE.y };
+    // 포수 시점: 나를 마주 본 투수의 오른팔은 화면 왼쪽(3루 쪽)에 있다
+    return { x: p.hand === "R" ? 2 * HOME.x - RELEASE.x : RELEASE.x, y: RELEASE.y };
   }
-  function batterSide(b) { return b.hand === "L" ? 2 * HOME.x - BATTER_X : BATTER_X; }
   // 같은 손 대결이면 타자가 불리 (공이 등 뒤에서 들어오고 변화구가 도망간다)
   function platoonFactor(b, p) { return b.hand === p.hand ? 0.9 : 1.08; }
 
@@ -1143,7 +1143,7 @@
 
     ctx.save();
     ctx.translate(x, feet);
-    if (currentPitcher().hand === "L") ctx.scale(-1, 1);              // 좌완 투구폼
+    if (currentPitcher().hand === "R") ctx.scale(-1, 1);              // 우완은 화면 왼쪽 팔로 반전
     ctx.beginPath(); ctx.fillStyle = "rgba(0,0,0,0.2)";
     ctx.ellipse(0, 2, 22, 6, 0, 0, Math.PI * 2); ctx.fill();
 
