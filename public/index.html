@@ -93,6 +93,8 @@
   function makeTeam(name, short, color, dark, names, pitchers) {
     return {
       name: name, short: short, color: color, dark: dark,
+      pants: color === "#f7f8fa" ? "#d3d8dd" : "#7c7f86",
+      numberColor: color === "#f7f8fa" ? dark : "#f5eceb",
       lineup: names.map(function (n) {
         return batter(n[0], n[1], n[2], n[3]);
       }),
@@ -100,7 +102,7 @@
     };
   }
 
-  const HOME_TEAM = makeTeam("서울 스타즈", "SEO", "#f6f7f8", "#1b3a6b", [
+  const HOME_TEAM = makeTeam("서울 스타즈", "SEO", "#f7f8fa", "#16305a", [
     ["김하람", 0.80, 0.55, 0.85], ["이도윤", 0.78, 0.60, 0.70], ["박준서", 0.72, 0.92, 0.45],
     ["최은우", 0.70, 0.95, 0.40], ["정시우", 0.74, 0.78, 0.55], ["강태현", 0.72, 0.70, 0.60],
     ["윤서진", 0.68, 0.62, 0.65], ["임수호", 0.66, 0.55, 0.72], ["오재민", 0.64, 0.45, 0.80]
@@ -111,7 +113,7 @@
     pitcher("마무리 오승환", 38, 0.83, ["fastball", "slider", "change"])
   ]);
 
-  const AWAY_TEAM = makeTeam("부산 웨이브", "BUS", "#d9dde2", "#7a1f2b", [
+  const AWAY_TEAM = makeTeam("부산 웨이브", "BUS", "#9e2733", "#2c0a10", [
     ["한지호", 0.79, 0.50, 0.88], ["서민준", 0.77, 0.58, 0.72], ["조현우", 0.73, 0.88, 0.48],
     ["신재혁", 0.71, 0.93, 0.42], ["문태양", 0.75, 0.72, 0.58], ["배승민", 0.70, 0.68, 0.62],
     ["노건우", 0.68, 0.60, 0.66], ["황인성", 0.65, 0.52, 0.74], ["구민재", 0.63, 0.44, 0.82]
@@ -991,7 +993,7 @@
     ctx.closePath(); ctx.fill();
   }
 
-  function drawFigure(x, y, scale, jersey, dark, back) {
+  function drawFigure(x, y, scale, jersey, dark, back, pants) {
     const s = scale;
     ctx.save();
     ctx.translate(x, y);
@@ -1000,13 +1002,13 @@
     ctx.ellipse(0, 2 * s, 9 * s, 3 * s, 0, 0, Math.PI * 2);
     ctx.fill();
     // 다리
-    ctx.strokeStyle = "#cfd4d9";
+    ctx.strokeStyle = pants || "#cfd4d9";
     ctx.lineWidth = 3.4 * s;
     ctx.lineCap = "round";
     ctx.beginPath(); ctx.moveTo(0, -13 * s); ctx.lineTo(-4 * s, 0); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(0, -13 * s); ctx.lineTo(4 * s, 0); ctx.stroke();
     // 몸통
-    roundRect(-5.5 * s, -27 * s, 11 * s, 15 * s, 3 * s, jersey);
+    roundRect(-5.5 * s, -27 * s, 11 * s, 15 * s, 3 * s, jersey, "rgba(0,0,0,0.45)");
     // 팔
     ctx.strokeStyle = jersey;
     ctx.lineWidth = 3 * s;
@@ -1045,7 +1047,7 @@
       }
       const p = fieldPos(d, ang);
       const s = clamp(pxPerM(d) / 8.5, 0.32, 1.25);
-      drawFigure(p.x, p.y, s, t.color, t.dark, false);
+      drawFigure(p.x, p.y, s, t.color, t.dark, false, t.pants);
     });
   }
 
@@ -1065,13 +1067,13 @@
     const lift = Math.sin(Math.min(wind, 0.55) / 0.55 * Math.PI) * (wind < 0.65 ? 1 : 0);
     const stride = wind > 0.55 ? Math.min(1, (wind - 0.55) / 0.45) : 0;
 
-    ctx.strokeStyle = "#d8dde2"; ctx.lineWidth = 8; ctx.lineCap = "round";
+    ctx.strokeStyle = t.pants; ctx.lineWidth = 8; ctx.lineCap = "round";
     ctx.beginPath(); ctx.moveTo(0, hip); ctx.lineTo(-5 - stride * 16, 0); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(0, hip);
     if (lift > 0.15) ctx.lineTo(9 + lift * 8, hip - lift * 18); else ctx.lineTo(7 + stride * 16, 0);
     ctx.stroke();
 
-    roundRect(-13, shoulder, 26, -shoulder + hip, 7, t.color);
+    roundRect(-13, shoulder, 26, -shoulder + hip, 7, t.color, "rgba(0,0,0,0.5)");
     ctx.fillStyle = t.dark;
     ctx.fillRect(-13, shoulder + 3, 26, 4);
 
@@ -1105,9 +1107,8 @@
 
     const hipY = g - 100, shoulderY = g - 176, headY = g - 206;
 
-    ctx.fillStyle = "#cfd4d9";
-    roundRect(x - 32, hipY, 28, 78, 10, "#cfd4d9");
-    roundRect(x + 6, hipY, 28, 78, 10, "#cfd4d9");
+    roundRect(x - 32, hipY, 28, 78, 10, t.pants, "rgba(0,0,0,0.35)");
+    roundRect(x + 6, hipY, 28, 78, 10, t.pants, "rgba(0,0,0,0.35)");
     ctx.fillStyle = t.dark;
     ctx.fillRect(x - 31, hipY + 72, 26, 14);
     ctx.fillRect(x + 7, hipY + 72, 26, 14);
@@ -1116,13 +1117,13 @@
     roundRect(x + 4, g - 12, 34, 14, 4, "#22272b");
 
     ctx.save();
-    roundRect(x - 36, shoulderY, 72, hipY - shoulderY + 12, 15, t.color);
+    roundRect(x - 36, shoulderY, 72, hipY - shoulderY + 12, 15, t.color, "rgba(0,0,0,0.5)");
     ctx.clip();
     ctx.fillStyle = "rgba(0,0,0,0.12)";
     for (let i = -3; i <= 3; i++) ctx.fillRect(x + i * 12 - 1, shoulderY, 2, 110);
     ctx.restore();
 
-    ctx.fillStyle = t.dark;
+    ctx.fillStyle = t.numberColor;
     ctx.font = "bold 28px 'Trebuchet MS', sans-serif";
     ctx.textAlign = "center";
     ctx.fillText(String((battingTeam().order + 1)), x, shoulderY + 56);
@@ -1195,7 +1196,7 @@
     const sp = fieldPos(rp.d, rp.ang);
     const t = battingTeam();
     const sc = clamp(pxPerM(rp.d) / 8.5, 0.4, 1.5);
-    drawFigure(sp.x, sp.y, sc, t.color, t.dark, true);
+    drawFigure(sp.x, sp.y, sc, t.color, t.dark, true, t.pants);
   }
 
   function drawMitt() {
