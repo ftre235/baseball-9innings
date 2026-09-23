@@ -463,6 +463,8 @@
     dist = Math.max(2, dist);
 
     const out = { exit: c.exit, angle: c.angle, spray: c.spray, distance: Math.round(dist), hang: hang, grounder: grounder };
+    // 주자 시간은 어떤 결과든 필요하므로 조기 return 이전에 계산한다
+    out.runTime = 4.55 - currentBatter().speed * 1.0;
 
     // 파울: 파울 라인 밖으로 가거나, 빗맞은 타구는 높은 확률로 파울
     const foulChance = clamp(0.52 - (c.acc || 0) * 0.46, 0.05, 0.52);
@@ -486,7 +488,6 @@
     out.reach = bestT;
 
     const bat = currentBatter();
-    out.runTime = 4.55 - bat.speed * 1.0;      // 타자 주자가 1루까지 걸리는 시간
     if (!grounder) {
       if (bestT <= hang - 0.1) {
         out.kind = c.angle >= 22 ? "flyout" : "lineout";
@@ -835,7 +836,7 @@
     } else {
       endSec = Math.max(res.hang || 1.2, 1.1) + 0.3;
       splitT = 1; arriveT = 1;
-      runT = Math.min(1, res.runTime / endSec);
+      runT = Math.min(1, (res.runTime || 4.1) / endSec);
     }
     anim.ballFlight = {
       t: 0,
@@ -1468,6 +1469,8 @@
 
   const BASE_PTS = [polar(0, 0), polar(27.4, 45), polar(38.8, 0), polar(27.4, -45), polar(0, 0)];
   function runnerFieldPos(p) {
+    if (!isFinite(p)) p = 0;
+    p = clamp(p, 0, 4);
     const i = Math.min(3, Math.floor(p));
     const f = clamp(p - i, 0, 1);
     const a = BASE_PTS[i], b = BASE_PTS[i + 1];
@@ -1478,7 +1481,8 @@
   function batterRunnerProgress() {
     if (anim.phase === "flight" && anim.ballFlight) {
       const f = anim.ballFlight;
-      return Math.min(1, f.t / Math.max(0.05, f.runT));   // 실제 주루 시간에 맞춰 달린다
+      const rt = isFinite(f.runT) && f.runT > 0.05 ? f.runT : 1;
+      return Math.min(1, f.t / rt);                       // 실제 주루 시간에 맞춰 달린다
     }
     if (anim.phase === "play" && anim.play) {
       if (anim.play.res.kind === "strikeout") return null;
@@ -2139,12 +2143,12 @@
 
   // ===================== 루프 =====================
   function loop(now) {
+    requestAnimationFrame(loop);        // 한 프레임이 실패해도 게임이 멈추지 않게 먼저 예약
     if (!lastTime) lastTime = now;
     const dt = Math.min(50, now - lastTime);
     lastTime = now;
     update(dt);
     render();
-    requestAnimationFrame(loop);
   }
 
   // ===================== 초기화 =====================
