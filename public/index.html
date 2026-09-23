@@ -155,6 +155,37 @@
   let anim = null;
   let ui = { showSub: false, selectedPitch: 0, message: "", hoverZone: null };
   let lastTime = 0, shake = 0, flash = 0;
+  let lastError = null, errorCount = 0, failStreak = 0;
+
+  function noteError(where, e) {
+    errorCount++;
+    const stack = String((e && e.stack) || "");
+    lastError = {
+      where: where,
+      msg: String((e && e.message) || e),
+      at: (game ? game.inning + (game.half === "top" ? "회초" : "회말") : "-") + " / " + (anim ? anim.phase : "-"),
+      stack: stack.slice(0, 240)
+    };
+    if (window.console && console.error) console.error("[9이닝 야구]", where, e);
+  }
+
+  // 어떤 이유로 진행이 막혀도 경기를 이어가기 위한 복구
+  function recoverFromError() {
+    try {
+      shake = 0; flash = 0;
+      cam.tx = cam.x = W / 2; cam.ty = cam.y = H / 2; cam.tscale = cam.scale = 1;
+      anim.ballFlight = null; anim.batted = null; anim.runnerAnim = null;
+      anim.stealResult = null; anim.pitch = null; anim.batSwing = 0;
+      game.steals = [];
+      game.balls = 0; game.strikes = 0;
+      if (game.outs >= 3) endHalf();
+      if (game.over) { setPhase("game-end", 0); return; }
+      nextBatter();
+    } catch (e2) {
+      noteError("recover", e2);
+      anim.phase = "title";
+    }
+  }
   let cam = { x: W / 2, y: H / 2, scale: 1, tx: W / 2, ty: H / 2, tscale: 1 };
 
   function newGame() {
@@ -384,6 +415,7 @@
       bx: type.bx * slot.bx * (p.hand === "L" ? -1 : 1), by: type.by * slot.by, hand: p.hand
     };
     cpuStealDecision();
+    anim.batSwing = 0;          // 이전 스윙 자세가 남지 않게 초기화
     ui.message = "";
     setPhase("wind", 750);
   }
@@ -883,6 +915,13 @@
     const p = anim.phase;
 
     if (p === "title" || p === "game-end" || p === "aim") return;
+
+    // 입력 대기 페이즈가 아닌데 너무 오래 머물면 스스로 진행을 복구한다
+    if (anim.time > 12000) {
+      noteError("stall", new Error("진행 정지: " + p));
+      recoverFromError();
+      return;
+    }
 
     if (p === "half-start") {
       if (anim.time >= anim.dur) nextBatter();
@@ -2142,13 +2181,33 @@
   }
 
   // ===================== 루프 =====================
+  function drawErrorBadge() {
+    if (!lastError) return;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    const msg = lastError.where + ": " + lastError.msg;
+    ctx.font = "12px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    const bw = Math.max(280, Math.min(W - 40, ctx.measureText(msg).width + 28));
+    roundRect(W / 2 - bw / 2, H - 56, bw, 42, 8, "rgba(120,18,18,0.94)", "#ff8a80");
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ffcdd2";
+    ctx.font = "bold 11px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillText("오류 " + errorCount + "회 · " + lastError.at + " (이 화면을 캡처해 주세요)", W / 2, H - 38);
+    ctx.fillStyle = "#fff";
+    ctx.font = "12px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillText(msg, W / 2, H - 21);
+  }
+
   function loop(now) {
     requestAnimationFrame(loop);        // 한 프레임이 실패해도 게임이 멈추지 않게 먼저 예약
     if (!lastTime) lastTime = now;
     const dt = Math.min(50, now - lastTime);
     lastTime = now;
-    update(dt);
-    render();
+    let ok = true;
+    try { update(dt); } catch (e) { noteError("update", e); ok = false; }
+    try { render(); } catch (e) { noteError("render", e); ok = false; }
+    try { drawErrorBadge(); } catch (e) { /* 배지까지 실패하면 무시 */ }
+    if (ok) failStreak = 0;
+    else if (++failStreak > 40) { failStreak = 0; recoverFromError(); }
   }
 
   // ===================== 초기화 =====================
@@ -2190,6 +2249,8 @@
     if (e.key === "s" || e.key === "S") { e.preventDefault(); trySteal(); }
     if (e.key === "Escape") ui.showSub = false;
   });
+
+  window.addEventListener("error", function (ev) { noteError("event", (ev && ev.error) || ev); });
 
   requestAnimationFrame(loop);
 })();
