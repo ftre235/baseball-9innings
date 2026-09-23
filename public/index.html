@@ -2229,7 +2229,7 @@
 
     if (p === "half-start") {
       title = game.inning + "회 " + (game.half === "top" ? "초" : "말");
-      sub = userIsPitching() ? HOME_TEAM.name + " 수비 · 내가 투수" : HOME_TEAM.name + " 공격 · 내가 타자";
+      sub = myTeam().name + (userIsPitching() ? " 수비 · 내가 투수" : " 공격 · 내가 타자");
     } else if (p === "half-end") {
       title = "공수 교대";
       sub = game.runs.away + " : " + game.runs.home;
@@ -2648,6 +2648,7 @@
       flash = 1;
       shake = msg.res.kind === "homerun" ? 12 : 6;
       startBallFlight(msg.res);
+      setPhase("flight", 0);        // 상대가 확정한 타구를 내 화면에서도 재생
     } else if (msg.kind === "foul") {
       anim.pendingSnap = msg.snap;
       ui.message = "파울";
