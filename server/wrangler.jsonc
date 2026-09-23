@@ -1,0 +1,11 @@
+{
+  "name": "baseball-relay",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-20",
+  "durable_objects": {
+    "bindings": [{ "name": "ROOMS", "class_name": "GameRoom" }]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["GameRoom"] }
+  ]
+}
