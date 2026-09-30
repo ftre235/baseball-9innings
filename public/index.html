@@ -671,7 +671,7 @@
     if (isOnline() && userIsPitching()) {
       const a = anim.pitch;
       netSend({ t: "pitch", type: typeKey, fx: a.fx, fy: a.fy, speed: a.speed, flight: a.flight,
-        rx: a.rx, ry: a.ry, bx: a.bx, by: a.by, hand: a.hand });
+        rx: a.rx, ry: a.ry, bx: a.bx, by: a.by, hand: a.hand, snap: snapshot() });
     }
     setPhase("wind", 750);
   }
@@ -1022,6 +1022,7 @@
     cam.tx = W / 2; cam.ty = H / 2; cam.tscale = 1;
 
     ui.message = "";
+    netBroadcastState();
     if (userIsPitching()) setPhase("aim", 0);
     else setPhase("set", 700);
   }
@@ -1179,8 +1180,7 @@
   function finishBattedBall() {
     const res = anim.batted;
     if (isOnline() && !userIsPitching()) {
-      // 판정은 상대가 확정했다 — 받은 스냅샷을 적용만 한다
-      if (anim.pendingSnap) { applySnapshot(anim.pendingSnap); anim.pendingSnap = null; }
+      // 상태는 결과 수신 시 이미 적용됐다 — 연출만 이어서 보여준다
       anim.play = { res: res, info: { runs: 0, extra: "" } };
       setPhase("play", 1900);
       return;
@@ -1209,10 +1209,10 @@
     const waitingForPeer = isOnline() &&
       (p === "set" || p === "catch" || (p === "pitch" && anim.pitch && anim.pitch.swung));
     if (waitingForPeer) {
-      if (anim.time > 25000 && !anim.resyncAsked) {
-        anim.resyncAsked = true;                 // 너무 오래 끊기면 상태 다시 맞추기를 요청
+      if (anim.time > 8000 && anim.time - (anim.resyncAt || 0) > 8000) {
+        anim.resyncAt = anim.time;               // 8초마다 상태 맞추기를 요청
         netSend({ t: "resync-req" });
-        ui.netStatus = "상대와 상태를 다시 맞추는 중...";
+        ui.netStatus = "상대와 상태를 맞추는 중...";
       }
     } else if (anim.time > 12000) {
       noteError("stall", new Error("진행 정지: " + p));
@@ -1221,7 +1221,10 @@
     }
 
     if (p === "half-start") {
-      if (anim.time >= anim.dur) nextBatter();
+      if (anim.time >= anim.dur) {
+        if (isFollower()) { if (userIsPitching()) setPhase("aim", 0); else setPhase("set", 700); return; }
+        nextBatter();
+      }
     } else if (p === "half-end") {
       if (anim.time >= anim.dur) startHalf();
     } else if (p === "set") {
@@ -1256,6 +1259,7 @@
       }
     } else if (p === "steal") {
       if (anim.time >= anim.dur) {
+        if (isOnline() && !userIsPitching()) return;    // 판정은 수비 쪽이 한다
         if (game.outs >= 3) { endHalf(); if (game.over) setPhase("game-end", 0); return; }
         applyCount();
       }
@@ -1288,6 +1292,7 @@
       }
     } else if (p === "play") {
       if (anim.time >= anim.dur) {
+        if (isFollower()) return;                 // 호스트가 보낼 다음 상태를 기다린다
         if (checkGameEnd()) { setPhase("game-end", 0); return; }
         if (game.outs >= 3) {
           endHalf();
@@ -2565,8 +2570,34 @@
   }
 
   function netClose() {
-    if (net && net.ws) { try { net.ws.close(); } catch (e) {} }
+    if (net) { net.closing = true; if (net.ws) { try { net.ws.close(); } catch (e) {} } }
     net = null;
+  }
+
+  // 끊긴 방에 같은 코드로 다시 접속하고 상태를 받아온다
+  function netReconnect() {
+    const room = net.room, isHost = net.isHost, wasPlaying = anim.phase !== "title";
+    let ws;
+    try { ws = new WebSocket(RELAY_URL + "?room=" + encodeURIComponent(room)); }
+    catch (e) { ui.netStatus = "다시 연결 실패"; return; }
+    net.ws = ws;
+    ws.onopen = function () {
+      ui.netStatus = "다시 연결되었습니다";
+      net.retry = 0;
+      netSend({ t: "hello", team: ui.myTeam, host: isHost, rejoin: true });
+      if (wasPlaying && !isHost) netSend({ t: "resync-req" });
+    };
+    ws.onmessage = function (ev) {
+      let msg; try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      try { netHandle(msg); } catch (e) { noteError("netHandle", e); }
+    };
+    ws.onclose = function () {
+      if (!net || net.closing) return;
+      net.retry = (net.retry || 0) + 1;
+      if (net.retry <= 8) setTimeout(function () { if (net && !net.closing) netReconnect(); }, Math.min(4000, 400 * net.retry));
+      else { net.peerJoined = false; ui.netStatus = "연결이 끊어졌습니다"; }
+    };
+    ws.onerror = function () {};
   }
 
   function netSend(msg) {
@@ -2598,8 +2629,19 @@
       try { netHandle(msg); } catch (e) { noteError("netHandle", e); }
     };
     ws.onclose = function () {
-      if (net) net.peerJoined = false;
-      ui.netStatus = "연결이 끊어졌습니다";
+      if (!net || net.closing) return;
+      ui.netStatus = "연결이 끊어졌습니다 · 다시 연결하는 중...";
+      net.retry = (net.retry || 0) + 1;
+      if (net.retry <= 8) {
+        const delay = Math.min(4000, 400 * net.retry);
+        setTimeout(function () {
+          if (!net || net.closing) return;
+          netReconnect();
+        }, delay);
+      } else {
+        net.peerJoined = false;
+        ui.netStatus = "연결이 끊어졌습니다";
+      }
     };
     ws.onerror = function () { ui.netStatus = "연결 오류 (주소를 확인하세요)"; };
     ui.menu = "wait";
@@ -2607,6 +2649,13 @@
 
   // 내가 지금 수비(투수)인가 — 온라인은 호스트가 홈팀
   function iAmHome() { return ui.mode !== "online" || !net || net.isHost; }
+  // 온라인 참가자(게스트)는 이닝/타자 진행을 스스로 하지 않고 호스트 상태를 따라간다
+  function isFollower() { return ui.mode === "online" && net && net.peerJoined && !net.isHost; }
+  function netBroadcastState() {
+    if (ui.mode === "online" && net && net.peerJoined && net.isHost) {
+      netSend({ t: "state", snap: snapshot() });
+    }
+  }
 
   function netHandle(msg) {
     if (!net) return;
@@ -2614,9 +2663,12 @@
       net.peerTeam = msg.team;
       net.peerJoined = true;
       ui.netStatus = "상대 접속: " + teamDataById(msg.team).name;
-      // 서로의 팀을 알게 되면 호스트가 경기를 시작한다
       netSend({ t: "hello-ack", team: ui.myTeam, host: net.isHost });
-      if (net.isHost) netStartGame();
+      // 경기 중이면 새로 시작하지 않고 현재 상태만 맞춰준다 (재접속 대응)
+      if (net.isHost) {
+        if (anim.phase === "title") netStartGame();
+        else netSend({ t: "resync", snap: snapshot() });
+      }
     } else if (msg.t === "hello-ack") {
       if (!net.peerJoined) {
         net.peerTeam = msg.team;
@@ -2652,14 +2704,25 @@
     } else if (msg.t === "outcome") {
       remoteOutcome(msg);
     } else if (msg.t === "resync-req") {
-      // 수비(판정 권한) 쪽이 현재 상태를 보내준다
-      if (userIsPitching()) netSend({ t: "resync", snap: snapshot() });
-    } else if (msg.t === "resync") {
+      // 호스트 상태를 기준으로 맞춘다 (둘 다 타자가 되는 교착도 이걸로 풀린다)
+      if (net.isHost) netSend({ t: "resync", snap: snapshot() });
+    } else if (msg.t === "state") {
+      const beforeHalf = game.inning + game.half;
       applySnapshot(msg.snap);
-      anim.resyncAsked = false;
+      anim.pitch = null; anim.batted = null; anim.pendingSnap = null;
+      anim.resyncAt = 0; ui.netStatus = "";
+      cam.tx = W / 2; cam.ty = H / 2; cam.tscale = 1;
+      if (game.over) { setPhase("game-end", 0); return; }
+      if (beforeHalf !== game.inning + game.half) { setPhase("half-start", 1200); return; }
+      if (userIsPitching()) setPhase("aim", 0); else setPhase("set", 700);
+    } else if (msg.t === "resync") {
+      if (net.isHost) return;                    // 호스트 상태가 기준이므로 되돌려 받지 않는다
+      applySnapshot(msg.snap);
+      anim.resyncAt = 0;
       ui.netStatus = "";
-      anim.pitch = null;
-      nextBatter();
+      anim.pitch = null; anim.batted = null; anim.pendingSnap = null;
+      if (game.over) { setPhase("game-end", 0); return; }
+      if (userIsPitching()) setPhase("aim", 0); else setPhase("set", 700);
     } else if (msg.t === "bye") {
       ui.netStatus = "상대가 나갔습니다";
       net.peerJoined = false;
@@ -2734,6 +2797,10 @@
   function remotePitch(msg) {
     const type = PITCH_TYPES[msg.type];
     if (!type) return;
+    // 매 투구마다 상대의 상태를 그대로 받아 어긋남을 스스로 바로잡는다
+    if (msg.snap) applySnapshot(msg.snap);
+    anim.pendingSnap = null;
+    anim.resyncAsked = false;
     anim.pitch = {
       type: type, speed: msg.speed, flight: msg.flight, elapsed: 0,
       fx: msg.fx, fy: msg.fy, aim: { x: msg.fx, y: msg.fy }, swung: false, swingAt: null,
@@ -2746,23 +2813,25 @@
 
   // ---- 수비 쪽이 확정한 결과를 내 화면에 적용 ----
   function remoteOutcome(msg) {
+    // 상태는 받는 즉시 적용한다. 애니메이션이 끝날 때까지 미루면
+    // 다음 투구가 먼저 도착했을 때 그 결과가 통째로 사라져 이닝이 어긋난다.
+    if (msg.snap) applySnapshot(msg.snap);
+    anim.pendingSnap = null;
+
     if (msg.kind === "play" && msg.res) {
       anim.batted = msg.res;
-      anim.pendingSnap = msg.snap;
       anim.batSwing = anim.batSwing || 0.0001;
       flash = 1;
       shake = msg.res.kind === "homerun" ? 12 : 6;
       startBallFlight(msg.res);
       setPhase("flight", 0);        // 상대가 확정한 타구를 내 화면에서도 재생
     } else if (msg.kind === "foul") {
-      anim.pendingSnap = msg.snap;
       ui.message = "파울";
       setPhase("foul", 900);
     } else {
       // 볼/스트라이크/삼진/볼넷/도루 등 — 배너만 맞춰 보여주고 상태를 적용
       ui.message = msg.call || "";
-      if (msg.steal) { anim.stealResult = msg.steal; applySnapshot(msg.snap); setPhase("steal", 1200); return; }
-      applySnapshot(msg.snap);
+      if (msg.steal) { anim.stealResult = msg.steal; setPhase("steal", 1200); return; }
       if (msg.play) { anim.play = { res: msg.play, info: msg.info || { runs: 0, extra: "" } }; setPhase("play", 1500); }
       else if (msg.snap.over) setPhase("game-end", 0);
       else nextBatter();
