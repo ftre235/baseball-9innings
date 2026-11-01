@@ -1136,7 +1136,7 @@
     anim.batted = res;
     startBallFlight(res);
     setPhase("flight", 0);
-    if (isOnline() && userIsPitching()) netSendOutcome("play", res);
+    if (isOnline() && userIsPitching()) netSend({ t: "outcome", kind: "play", res: res });
   }
 
   function startBallFlight(res) {
@@ -1181,12 +1181,14 @@
     const res = anim.batted;
     if (isOnline() && !userIsPitching()) {
       // 상태는 결과 수신 시 이미 적용됐다 — 연출만 이어서 보여준다
-      anim.play = { res: res, info: { runs: 0, extra: "" } };
+      anim.play = { res: res, info: anim.remoteInfo || { runs: 0, extra: "" } };
+      anim.remoteInfo = null;
       setPhase("play", 1900);
       return;
     }
     const r = applyPlay(res);
     anim.play = { res: res, info: r };
+    if (isOnline() && userIsPitching()) netSendOutcome("playdone", null, { info: r });
     setPhase("play", 1900);
   }
 
@@ -2818,6 +2820,11 @@
     if (msg.snap) applySnapshot(msg.snap);
     anim.pendingSnap = null;
 
+    if (msg.kind === "playdone") {
+      anim.remoteInfo = msg.info || null;       // 득점/병살 같은 배너 문구용
+      if (anim.play) anim.play.info = anim.remoteInfo || anim.play.info;
+      return;
+    }
     if (msg.kind === "play" && msg.res) {
       anim.batted = msg.res;
       anim.batSwing = anim.batSwing || 0.0001;
