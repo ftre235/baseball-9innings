@@ -356,12 +356,198 @@
   let anim = null;
   let ui = {
     showSub: false, selectedPitch: 0, message: "", hoverZone: null,
-    menu: "mode",            // mode | team | room | wait
-    mode: "bot",             // bot | online
+    menu: "mode",            // mode | team | room | wait | create
+    mode: "bot",             // bot | online | career
     pickStep: 0,             // 0 = 내 팀, 1 = 상대 팀(봇 모드)
     myTeam: "SEO", oppTeam: "BUS",
-    roomCode: "", roomInput: "", netStatus: "", hover: null
+    roomCode: "", roomInput: "", netStatus: "", hover: null,
+    make: null               // 선수 생성 중인 입력값
   };
+
+  // ===================== 선수 육성 =====================
+  const CAREER_KEY = "baseball-career";
+  const BAT_POS = [
+    { id: "C",  name: "포수",   c: 0.02, p: 0.00, s: -0.06 },
+    { id: "1B", name: "1루수",  c: 0.00, p: 0.05, s: -0.05 },
+    { id: "2B", name: "2루수",  c: 0.03, p: -0.04, s: 0.04 },
+    { id: "3B", name: "3루수",  c: 0.00, p: 0.04, s: -0.02 },
+    { id: "SS", name: "유격수", c: 0.02, p: -0.03, s: 0.05 },
+    { id: "LF", name: "좌익수", c: 0.00, p: 0.03, s: 0.00 },
+    { id: "CF", name: "중견수", c: 0.01, p: -0.02, s: 0.07 },
+    { id: "RF", name: "우익수", c: 0.00, p: 0.04, s: 0.01 }
+  ];
+  const PIT_ROLE = [
+    { id: "starter", name: "선발",   desc: "5경기마다 등판 · 길게 던진다", stamina: 96, order: 3 },
+    { id: "middle",  name: "중간",   desc: "접전 중반에 등판", stamina: 34, order: 1 },
+    { id: "closer",  name: "마무리", desc: "9회 리드 지키기", stamina: 30, order: 2 }
+  ];
+  let career = null;
+
+  function rnd(a, b) { return a + Math.random() * (b - a); }
+
+  // 시작 능력치는 낮게 — 성장으로 올리는 게 재미다
+  function makeCareerBatter(name, teamId, posId, hand) {
+    const pos = BAT_POS.find(function (x) { return x.id === posId; }) || BAT_POS[0];
+    return {
+      type: "batter", name: name, teamId: teamId, hand: hand, pos: pos.id,
+      contact: clamp(rnd(0.54, 0.62) + pos.c, 0.45, 0.75),
+      power: clamp(rnd(0.38, 0.50) + pos.p, 0.25, 0.75),
+      speed: clamp(rnd(0.50, 0.62) + pos.s, 0.30, 0.85),
+      order: 8,                                  // 하위타선에서 시작
+      day: 0, stats: { g: 0, ab: 0, hit: 0, hr: 0, rbi: 0, bb: 0, k: 0, sb: 0 }
+    };
+  }
+  function makeCareerPitcher(name, teamId, roleId, hand, arm) {
+    const role = PIT_ROLE.find(function (x) { return x.id === roleId; }) || PIT_ROLE[1];
+    return {
+      type: "pitcher", name: name, teamId: teamId, hand: hand, arm: arm, role: role.id,
+      control: rnd(0.60, 0.68),
+      stamina: role.stamina,
+      arsenal: ["fastball", "slider", "change"],
+      day: 0, stats: { g: 0, outs: 0, k: 0, bb: 0, runs: 0, pitches: 0 }
+    };
+  }
+
+  function saveCareer() {
+    try { localStorage.setItem(CAREER_KEY, JSON.stringify(career)); } catch (e) {}
+  }
+  // 내 선수를 소속팀 로스터에 끼워 넣는다 (유저 = 홈팀)
+  function injectCareerPlayer() {
+    if (!career) return;
+    if (career.type === "batter") {
+      const b = batter(career.name, career.contact, career.power, career.speed, career.hand);
+      b.mine = true;
+      HOME_TEAM.lineup[clamp(career.order, 0, 8)] = b;
+    } else {
+      const slot = career.role === "starter" ? 0 : (career.role === "closer" ? 3 : 1);
+      const q = pitcher(PIT_ROLE.find(function (x) { return x.id === career.role; }).name + " " + career.name,
+        career.stamina, career.control, career.arsenal, career.hand, career.arm);
+      q.mine = true;
+      HOME_TEAM.staff[clamp(slot, 0, HOME_TEAM.staff.length - 1)] = q;
+      HOME_TEAM.pitcherIdx = career.role === "starter" ? 0 : HOME_TEAM.pitcherIdx;
+    }
+  }
+
+  let simMode = false;          // true면 내 선수 차례가 아니라 자동 진행
+  const SEASON_GAMES = 30;
+
+  // 지금이 내 선수 차례인가? 아니면 자동으로 넘긴다
+  function careerCheckTurn() {
+    if (ui.mode !== "career" || !career) { simMode = false; return; }
+    if (career.type === "batter") {
+      simMode = !(!userIsPitching() && currentBatter().mine);
+      return;
+    }
+    if (!userIsPitching()) { simMode = true; return; }      // 투수는 우리 공격 때 쉰다
+    const t = HOME_TEAM;
+    const mineIdx = t.staff.findIndex(function (q) { return q.mine; });
+    if (mineIdx >= 0 && !t.staff[t.pitcherIdx].mine && career.role !== "starter") {
+      const lead = game.runs.home - game.runs.away;
+      const ok = career.role === "closer"
+        ? (game.inning >= 9 && lead > 0 && lead <= 3)
+        : (game.inning >= 6 && game.inning <= 7 && Math.abs(lead) <= 3);
+      if (ok && mineIdx > t.pitcherIdx) {
+        t.pitcherIdx = mineIdx;
+        ui.message = "등판: " + t.staff[mineIdx].name;
+      }
+    }
+    // 체력이 바닥나면 강판 — 남은 경기는 지켜본다
+    const cur = t.staff[t.pitcherIdx];
+    if (cur && cur.mine && staminaRatio(cur) < 0.12 && t.pitcherIdx < t.staff.length - 1) {
+      t.pitcherIdx++;
+      ui.message = "교체: " + cur.name + " 강판";
+    }
+    simMode = !t.staff[t.pitcherIdx].mine;
+  }
+
+  // 경기 후 성장 — 오늘 성적이 능력치를 올리고 내린다
+  function careerGrow() {
+    if (!career) return null;
+    const d = [];
+    function bump(key, delta, label) {
+      if (Math.abs(delta) < 0.001) return;
+      career[key] = clamp(career[key] + delta, 0.25, 0.99);
+      d.push({ label: label, delta: delta });
+    }
+    if (career.type === "batter") {
+      const b = HOME_TEAM.lineup.find(function (x) { return x.mine; });
+      if (!b) return null;
+      const g = { ab: b.ab, hit: b.hit, rbi: b.rbi, sb: b.sb };
+      career.stats.g++; career.stats.ab += g.ab; career.stats.hit += g.hit;
+      career.stats.rbi += g.rbi; career.stats.sb += g.sb;
+      const avg = g.ab ? g.hit / g.ab : 0;
+      bump("contact", (avg - 0.25) * 0.05, "컨택");
+      bump("power", (g.rbi * 0.004) - (g.ab && !g.hit ? 0.004 : 0), "파워");
+      bump("speed", g.sb * 0.006, "주력");
+      career.lastLine = g.hit + "안타 / " + g.ab + "타수" + (g.rbi ? "  " + g.rbi + "타점" : "");
+    } else {
+      const q = HOME_TEAM.staff.find(function (x) { return x.mine; });
+      if (!q || q.pitches === 0) { career.lastLine = "등판 기회 없음"; return []; }
+      career.stats.g++; career.stats.k += q.k; career.stats.runs += q.runs;
+      career.stats.pitches += q.pitches;
+      bump("control", (q.k * 0.004) - (q.runs * 0.005), "제구");
+      career.stamina = clamp(career.stamina + q.pitches * 0.05, 28, 120);
+      d.push({ label: "체력", delta: q.pitches * 0.05 / 100 });
+      career.lastLine = q.pitches + "구  " + q.k + "탈삼진  " + q.runs + "실점";
+    }
+    // 타순/보직 승격
+    if (career.type === "batter" && career.contact > 0.70 && career.order > 2) career.order -= 1;
+    career.day++;
+    saveCareer();
+    return d;
+  }
+
+  function startCareer() {
+    const m = ui.make;
+    career = m.type === "batter"
+      ? makeCareerBatter(m.name, m.teamId, m.pos, m.hand)
+      : makeCareerPitcher(m.name, m.teamId, m.role, m.hand, m.arm);
+    saveCareer();
+    ui.mode = "career";
+    ui.myTeam = career.teamId;
+    ui.growth = null;
+    nextCareerGame();
+  }
+
+  // 선발은 5경기마다 등판 — 쉬는 날은 경기를 빠르게 돌려 결과만 본다
+  function careerPlaysToday() {
+    return !(career.type === "pitcher" && career.role === "starter" && career.day % 5 !== 0);
+  }
+
+  function nextCareerGame() {
+    const others = TEAM_DATA.filter(function (d) { return d.short !== career.teamId; });
+    ui.oppTeam = others[Math.floor(Math.random() * others.length)].short;
+    setTeams(career.teamId, ui.oppTeam);
+    const play = careerPlaysToday();
+    if (play) injectCareerPlayer();
+    newGame();
+    simMode = true;
+    if (!play) {
+      let guard = 0;
+      while (anim.phase !== "game-end" && guard++ < 400000) update(16);
+      career.lastLine = "휴식일 (등판 없음)";
+      career.day++;
+      saveCareer();
+      ui.growth = [];
+      ui.lastScore = game.runs.away + " : " + game.runs.home;
+      ui.menu = career.day >= SEASON_GAMES ? "season" : "day";
+      anim.phase = "title";
+    }
+  }
+
+  function finishCareerGame() {
+    ui.growth = careerGrow() || [];
+    ui.lastScore = game.runs.away + " : " + game.runs.home;
+    ui.menu = career.day >= SEASON_GAMES ? "season" : "day";
+    anim.phase = "title";
+  }
+
+  function loadCareer() {
+    try {
+      const raw = localStorage.getItem(CAREER_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) { return null; }
+  }
 
   // 팀 카드에 보여줄 요약 (로스터 평균)
   function teamSummary(data) {
@@ -1022,6 +1208,7 @@
     cam.tx = W / 2; cam.ty = H / 2; cam.tscale = 1;
 
     ui.message = "";
+    careerCheckTurn();
     netBroadcastState();
     if (userIsPitching()) setPhase("aim", 0);
     else setPhase("set", 700);
@@ -1205,6 +1392,7 @@
     anim.time += dt;
     const p = anim.phase;
 
+    if (p === "aim" && simMode) { throwPitch(pickPitchTypeAI(currentPitcher()), aiTarget()); return; }
     if (p === "title" || p === "game-end" || p === "aim") return;
 
     // 온라인에서 상대 입력을 기다리는 중이면 정지가 아니다
@@ -1238,7 +1426,7 @@
       const pt = anim.pitch;
       pt.elapsed += dt;
       if (!pt.swung && pt.swingAt !== null && pt.swingAt !== undefined &&
-          userIsPitching() && pt.elapsed >= pt.swingAt) {
+          (userIsPitching() || simMode) && pt.elapsed >= pt.swingAt) {
         doSwing(pt.elapsed - pt.flight);
         return;
       }
@@ -1348,7 +1536,13 @@
         if (inRect(pt, MODE_BTN[i])) {
           ui.mode = MODE_BTN[i].id;
           ui.pickStep = 0;
-          ui.menu = "team";
+          if (ui.mode === "career") {
+            ui.make = { type: "batter", pos: "CF", role: "starter", hand: "R",
+              arm: "threequarter", teamId: TEAM_DATA[0].short, name: "" };
+            ui.menu = "create";
+          } else {
+            ui.menu = "team";
+          }
           return;
         }
       }
@@ -1371,6 +1565,9 @@
       }
       return;
     }
+    if (ui.menu === "day") { dayMenuClick(pt); return; }
+    if (ui.menu === "season") { seasonMenuClick(pt); return; }
+    if (ui.menu === "create") { createMenuClick(pt); return; }
     if (ui.menu === "room") { roomMenuClick(pt); return; }
     if (ui.menu === "wait") { waitMenuClick(pt); return; }
   }
@@ -1390,7 +1587,10 @@
 
   function handleClick(pt) {
     if (anim.phase === "title") { menuClick(pt); return; }
-    if (anim.phase === "game-end") { anim.phase = "title"; ui.menu = "mode"; ui.pickStep = 0; netClose(); return; }
+    if (anim.phase === "game-end") {
+      if (ui.mode === "career" && career) { finishCareerGame(); return; }
+      anim.phase = "title"; ui.menu = "mode"; ui.pickStep = 0; netClose(); return;
+    }
 
     if (ui.showSub) {
       const idx = subButtonAt(pt);
@@ -2207,8 +2407,8 @@
     roundRect(x, y, w, h, 8, "rgba(10,14,18,0.78)");
     ctx.textAlign = "left";
     ctx.font = "bold 14px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
-    ctx.fillStyle = "#fff";
-    ctx.fillText(p.name, x + 14, y + 26);
+    ctx.fillStyle = p.mine ? "#ffd54f" : "#fff";
+    ctx.fillText((p.mine ? "★ " : "") + p.name, x + 14, y + 26);
     ctx.font = "11px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
     ctx.fillStyle = "#9fb0bd";
     ctx.fillText((p.hand === "L" ? "좌완" : "우완") + " " + armSlot(p).name +
@@ -2230,7 +2430,7 @@
     ctx.textAlign = "left";
     ctx.font = "bold 14px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
     ctx.fillStyle = "#fff";
-    ctx.fillText((battingTeam().order + 1) + "번 " + b.name, x + 14, y + 22);
+    ctx.fillText((battingTeam().order + 1) + "번 " + (b.mine ? "★ " : "") + b.name, x + 14, y + 22);
     ctx.font = "11px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
     ctx.fillStyle = "#9fb0bd";
     ctx.fillText((b.hand === "L" ? "좌타" : "우타") + "  컨택 " + Math.round(b.contact * 100) +
@@ -2446,10 +2646,127 @@
   }
 
   // ===================== 메뉴 =====================
+  // 온라인 대전은 코드를 남겨둔 채 입구만 닫았다 (되살리려면 아래에 다시 추가)
   const MODE_BTN = [
-    { id: "bot", x: 180, y: 300, w: 260, h: 110, title: "봇과 대결", desc: "혼자서 CPU 팀과 9이닝" },
-    { id: "online", x: 520, y: 300, w: 260, h: 110, title: "온라인 대전", desc: "방 코드로 친구와 대결" }
+    { id: "career", x: 180, y: 300, w: 260, h: 110, title: "선수 육성", desc: "내 선수를 만들어 키운다" },
+    { id: "bot", x: 520, y: 300, w: 260, h: 110, title: "봇과 대결", desc: "혼자서 CPU 팀과 9이닝" }
   ];
+
+  // ---- 선수 생성 화면 ----
+  function chipRow(items, y, selId, labelOf) {
+    const w = Math.min(104, Math.floor(860 / items.length) - 8);
+    const total = items.length * (w + 8) - 8;
+    const x0 = (W - total) / 2;
+    return items.map(function (it, i) {
+      return { x: x0 + i * (w + 8), y: y, w: w, h: 34, id: it.id || it, label: labelOf(it), on: (it.id || it) === selId };
+    });
+  }
+  function createRows() {
+    const m = ui.make;
+    const rows = {};
+    rows.type = chipRow([{ id: "batter" }, { id: "pitcher" }], 112, m.type,
+      function (it) { return it.id === "batter" ? "타자" : "투수"; });
+    rows.sub = m.type === "batter"
+      ? chipRow(BAT_POS, 186, m.pos, function (it) { return it.name; })
+      : chipRow(PIT_ROLE, 186, m.role, function (it) { return it.name; });
+    rows.hand = chipRow([{ id: "R" }, { id: "L" }], 258, m.hand,
+      function (it) { return it.id === "R" ? (m.type === "batter" ? "우타" : "우완") : (m.type === "batter" ? "좌타" : "좌완"); });
+    rows.arm = m.type === "pitcher"
+      ? chipRow(["overhand", "threequarter", "sidearm", "submarine"], 318, m.arm,
+          function (it) { return ARM_SLOTS[it].name; })
+      : [];
+    const ty = m.type === "pitcher" ? 388 : 330;
+    rows.team = TEAM_DATA.slice(0, 5).map(function (d, i) {
+      return { x: 120 + i * 148, y: ty, w: 140, h: 34, id: d.short, label: d.name, on: d.short === m.teamId };
+    }).concat(TEAM_DATA.slice(5).map(function (d, i) {
+      return { x: 120 + i * 148, y: ty + 42, w: 140, h: 34, id: d.short, label: d.name, on: d.short === m.teamId };
+    }));
+    rows.name = { x: W / 2 - 170, y: ty + 96, w: 220, h: 38 };
+    rows.start = { x: W / 2 + 60, y: ty + 96, w: 110, h: 38 };
+    return rows;
+  }
+
+  function drawCreateMenu() {
+    menuBg();
+    const m = ui.make, rows = createRows();
+    ctx.textAlign = "center";
+    ctx.font = "bold 30px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#fff";
+    ctx.fillText("선수 육성", W / 2, 62);
+    ctx.font = "13px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#9fb0bd";
+    ctx.fillText("시작 능력치는 낮습니다 — 경기 성적에 따라 오르내립니다", W / 2, 88);
+
+    function label(txt, y) {
+      ctx.textAlign = "left";
+      ctx.font = "12px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+      ctx.fillStyle = "#6b7883";
+      ctx.fillText(txt, 60, y);
+    }
+    function chips(list) {
+      list.forEach(function (c) {
+        roundRect(c.x, c.y, c.w, c.h, 7, c.on ? "rgba(26,115,232,0.9)" : "rgba(255,255,255,0.1)",
+          c.on ? "#64b5f6" : "rgba(255,255,255,0.22)");
+        ctx.textAlign = "center";
+        ctx.font = "bold 13px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+        ctx.fillStyle = c.on ? "#fff" : "#cfd8dd";
+        ctx.fillText(c.label, c.x + c.w / 2, c.y + 22);
+      });
+    }
+    label("유형", rows.type[0].y - 6); chips(rows.type);
+    label(m.type === "batter" ? "포지션" : "보직", rows.sub[0].y - 6); chips(rows.sub);
+    label(m.type === "batter" ? "타석" : "투구 손", rows.hand[0].y - 6); chips(rows.hand);
+    if (rows.arm.length) { label("투구 폼", rows.arm[0].y - 6); chips(rows.arm); }
+    label("소속팀", rows.team[0].y - 6); chips(rows.team);
+
+    if (m.type === "pitcher") {
+      const r = PIT_ROLE.find(function (x) { return x.id === m.role; });
+      ctx.textAlign = "center";
+      ctx.font = "12px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+      ctx.fillStyle = "#ffd54f";
+      ctx.fillText(r ? r.desc : "", W / 2, rows.sub[0].y + 52);
+    }
+
+    roundRect(rows.name.x, rows.name.y, rows.name.w, rows.name.h, 8, "rgba(255,255,255,0.1)", "rgba(255,255,255,0.25)");
+    ctx.textAlign = "center";
+    ctx.font = "bold 15px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = m.name ? "#fff" : "#6b7883";
+    ctx.fillText(m.name || "이름 입력 (클릭)", rows.name.x + rows.name.w / 2, rows.name.y + 25);
+
+    const ready = !!m.name;
+    roundRect(rows.start.x, rows.start.y, rows.start.w, rows.start.h, 8,
+      ready ? "rgba(26,115,232,0.9)" : "rgba(255,255,255,0.06)", ready ? "#64b5f6" : "rgba(255,255,255,0.15)");
+    ctx.fillStyle = ready ? "#fff" : "#55606a";
+    ctx.fillText("시작", rows.start.x + rows.start.w / 2, rows.start.y + 25);
+
+    roundRect(BACK_BTN.x, BACK_BTN.y, BACK_BTN.w, BACK_BTN.h, 8, "rgba(255,255,255,0.1)", "rgba(255,255,255,0.25)");
+    ctx.font = "bold 14px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#cfd8dd";
+    ctx.fillText("뒤로", BACK_BTN.x + BACK_BTN.w / 2, BACK_BTN.y + 25);
+  }
+
+  function createMenuClick(pt) {
+    const m = ui.make, rows = createRows();
+    function hit(list, set) {
+      for (let i = 0; i < list.length; i++) {
+        if (inRect(pt, list[i])) { set(list[i].id); return true; }
+      }
+      return false;
+    }
+    if (hit(rows.type, function (v) { m.type = v; })) return;
+    if (hit(rows.sub, function (v) { if (m.type === "batter") m.pos = v; else m.role = v; })) return;
+    if (hit(rows.hand, function (v) { m.hand = v; })) return;
+    if (rows.arm.length && hit(rows.arm, function (v) { m.arm = v; })) return;
+    if (hit(rows.team, function (v) { m.teamId = v; })) return;
+    if (inRect(pt, rows.name)) {
+      // 한글 입력은 prompt 가 가장 확실하다
+      const v = window.prompt("선수 이름", m.name || "");
+      if (v !== null) m.name = v.trim().slice(0, 8);
+      return;
+    }
+    if (inRect(pt, rows.start) && m.name) { startCareer(); return; }
+    if (inRect(pt, BACK_BTN)) { ui.menu = "mode"; return; }
+  }
   const TEAM_CARD = { x0: 26, y0: 168, w: 172, h: 120, gapX: 12, gapY: 20, cols: 5 };
   const BACK_BTN = { x: 26, y: H - 60, w: 110, h: 40 };
 
@@ -2936,8 +3253,176 @@
     if (inRect(pt, ROOM_BTN[2])) { netSend({ t: "bye" }); netClose(); ui.menu = "room"; ui.netStatus = ""; }
   }
 
+  const NEXT_BTN = { x: W / 2 - 90, y: 470, w: 180, h: 46 };
+
+  function careerRatingRows() {
+    if (career.type === "batter") {
+      return [["컨택", career.contact], ["파워", career.power], ["주력", career.speed]];
+    }
+    return [["제구", career.control], ["체력", career.stamina / 120]];
+  }
+
+  function drawDayMenu() {
+    menuBg();
+    const t = teamDataById(career.teamId);
+    ctx.textAlign = "center";
+    ctx.font = "bold 26px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#fff";
+    ctx.fillText(t.name + "  " + career.name, W / 2, 58);
+    ctx.font = "13px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#9fb0bd";
+    const role = career.type === "batter"
+      ? (BAT_POS.find(function (x) { return x.id === career.pos; }) || {}).name + " · " +
+        (career.hand === "L" ? "좌타" : "우타") + " · " + (career.order + 1) + "번 타순"
+      : (PIT_ROLE.find(function (x) { return x.id === career.role; }) || {}).name + " · " +
+        (career.hand === "L" ? "좌완" : "우완") + " " + ARM_SLOTS[career.arm].name;
+    ctx.fillText(role, W / 2, 84);
+    ctx.fillStyle = "#ffd54f";
+    ctx.fillText("시즌 " + career.day + " / " + SEASON_GAMES + " 경기", W / 2, 110);
+
+    roundRect(W / 2 - 300, 136, 290, 160, 10, "rgba(255,255,255,0.07)", "rgba(255,255,255,0.18)");
+    ctx.textAlign = "left";
+    ctx.font = "bold 14px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#cfd8dd";
+    ctx.fillText("지난 경기", W / 2 - 284, 162);
+    ctx.font = "15px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#fff";
+    ctx.fillText(career.lastLine || "-", W / 2 - 284, 192);
+    ctx.font = "12px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#9fb0bd";
+    if (ui.lastScore) ctx.fillText("팀 스코어  " + ui.lastScore, W / 2 - 284, 214);
+
+    ctx.font = "bold 14px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#cfd8dd";
+    ctx.fillText("성장", W / 2 - 284, 246);
+    const g = ui.growth || [];
+    if (!g.length) {
+      ctx.font = "12px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+      ctx.fillStyle = "#6b7883";
+      ctx.fillText("변화 없음", W / 2 - 284, 270);
+    } else {
+      g.forEach(function (it, i) {
+        const up = it.delta >= 0;
+        ctx.font = "13px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+        ctx.fillStyle = up ? "#81c784" : "#ff8a80";
+        const amt = (Math.abs(it.delta) * 100).toFixed(1);
+        ctx.fillText(it.label + " " + (up ? "+" : "-") + amt,
+          W / 2 - 284 + (i % 2) * 140, 270 + Math.floor(i / 2) * 20);
+      });
+    }
+
+    roundRect(W / 2 + 10, 136, 290, 160, 10, "rgba(255,255,255,0.07)", "rgba(255,255,255,0.18)");
+    ctx.font = "bold 14px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#cfd8dd";
+    ctx.fillText("현재 능력치", W / 2 + 26, 162);
+    careerRatingRows().forEach(function (r, i) {
+      const y = 190 + i * 32;
+      ctx.font = "12px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+      ctx.fillStyle = "#9fb0bd";
+      ctx.fillText(r[0], W / 2 + 26, y + 11);
+      roundRect(W / 2 + 76, y, 170, 13, 6, "rgba(255,255,255,0.12)");
+      roundRect(W / 2 + 76, y, 170 * clamp(r[1], 0.05, 1), 13, 6, "#4fc3f7");
+      ctx.fillStyle = "#fff";
+      ctx.fillText(String(Math.round(r[1] * 100)), W / 2 + 256, y + 11);
+    });
+
+    ctx.textAlign = "center";
+    ctx.font = "13px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#cfd8dd";
+    const st = career.stats;
+    ctx.fillText(career.type === "batter"
+      ? "통산  " + st.g + "경기  " + st.hit + "안타 / " + st.ab + "타수  타율 " +
+        (st.ab ? (st.hit / st.ab).toFixed(3).replace("0.", ".") : ".000") + "  " + st.rbi + "타점  " + st.sb + "도루"
+      : "통산  " + st.g + "경기  " + st.pitches + "구  " + st.k + "탈삼진  " + st.runs + "실점",
+      W / 2, 334);
+
+    const nextPlay = careerPlaysToday();
+    ctx.font = "12px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = nextPlay ? "#81c784" : "#6b7883";
+    ctx.fillText(career.type === "pitcher" && career.role === "starter"
+      ? (nextPlay ? "다음 경기 등판일입니다" : "다음 경기는 휴식일 — 결과만 보고 넘어갑니다")
+      : (career.type === "pitcher" ? "등판 상황이 오면 마운드에 오릅니다" : "다음 경기 선발 출장"),
+      W / 2, 362);
+
+    roundRect(NEXT_BTN.x, NEXT_BTN.y, NEXT_BTN.w, NEXT_BTN.h, 10, "rgba(26,115,232,0.9)", "#64b5f6");
+    ctx.font = "bold 17px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#fff";
+    ctx.fillText("다음 경기", W / 2, NEXT_BTN.y + 29);
+
+    roundRect(BACK_BTN.x, BACK_BTN.y, BACK_BTN.w, BACK_BTN.h, 8, "rgba(255,255,255,0.1)", "rgba(255,255,255,0.25)");
+    ctx.font = "bold 14px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#cfd8dd";
+    ctx.fillText("나가기", BACK_BTN.x + BACK_BTN.w / 2, BACK_BTN.y + 25);
+  }
+
+  const SEASON_BTN = { x: W / 2 - 90, y: 440, w: 180, h: 46 };
+
+  function drawSeasonEnd() {
+    menuBg();
+    ctx.textAlign = "center";
+    ctx.font = "bold 34px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#ffd54f";
+    ctx.fillText("시즌 종료", W / 2, 120);
+    ctx.font = "16px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#fff";
+    ctx.fillText(career.name + "  (" + teamDataById(career.teamId).name + ")", W / 2, 160);
+    const st = career.stats;
+    ctx.font = "15px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#cfd8dd";
+    ctx.fillText(career.type === "batter"
+      ? st.g + "경기  타율 " + (st.ab ? (st.hit / st.ab).toFixed(3).replace("0.", ".") : ".000") +
+        "  " + st.hit + "안타  " + st.rbi + "타점  " + st.sb + "도루"
+      : st.g + "경기  " + st.k + "탈삼진  " + st.runs + "실점  " + st.pitches + "구", W / 2, 200);
+
+    careerRatingRows().forEach(function (r, i) {
+      const y = 250 + i * 34;
+      ctx.textAlign = "right";
+      ctx.font = "13px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+      ctx.fillStyle = "#9fb0bd";
+      ctx.fillText(r[0], W / 2 - 110, y + 11);
+      roundRect(W / 2 - 100, y, 200, 14, 7, "rgba(255,255,255,0.12)");
+      roundRect(W / 2 - 100, y, 200 * clamp(r[1], 0.05, 1), 14, 7, "#4fc3f7");
+      ctx.textAlign = "left";
+      ctx.fillStyle = "#fff";
+      ctx.fillText(String(Math.round(r[1] * 100)), W / 2 + 110, y + 11);
+    });
+
+    roundRect(SEASON_BTN.x, SEASON_BTN.y, SEASON_BTN.w, SEASON_BTN.h, 10, "rgba(26,115,232,0.9)", "#64b5f6");
+    ctx.textAlign = "center";
+    ctx.font = "bold 17px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#fff";
+    ctx.fillText("다음 시즌", W / 2, SEASON_BTN.y + 29);
+
+    roundRect(BACK_BTN.x, BACK_BTN.y, BACK_BTN.w, BACK_BTN.h, 8, "rgba(255,255,255,0.1)", "rgba(255,255,255,0.25)");
+    ctx.font = "bold 14px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#cfd8dd";
+    ctx.fillText("나가기", BACK_BTN.x + BACK_BTN.w / 2, BACK_BTN.y + 25);
+  }
+
+  function leaveCareer() { ui.menu = "mode"; ui.mode = "bot"; simMode = false; }
+
+  function dayMenuClick(pt) {
+    if (inRect(pt, NEXT_BTN)) { nextCareerGame(); return; }
+    if (inRect(pt, BACK_BTN)) { leaveCareer(); return; }
+  }
+  function seasonMenuClick(pt) {
+    if (inRect(pt, SEASON_BTN)) {
+      career.day = 0;
+      career.stats = career.type === "batter"
+        ? { g: 0, ab: 0, hit: 0, hr: 0, rbi: 0, bb: 0, k: 0, sb: 0 }
+        : { g: 0, outs: 0, k: 0, bb: 0, runs: 0, pitches: 0 };
+      saveCareer();
+      nextCareerGame();
+      return;
+    }
+    if (inRect(pt, BACK_BTN)) { leaveCareer(); return; }
+  }
+
   function drawTitle() {
-    if (ui.menu === "team") drawTeamMenu();
+    if (ui.menu === "day") drawDayMenu();
+    else if (ui.menu === "season") drawSeasonEnd();
+    else if (ui.menu === "create") drawCreateMenu();
+    else if (ui.menu === "team") drawTeamMenu();
     else if (ui.menu === "room") drawRoomMenu();
     else if (ui.menu === "wait") drawWaitMenu();
     else drawModeMenu();
@@ -3137,7 +3622,10 @@
     if (e.code === "Space" || e.code === "Enter") {
       e.preventDefault();
       if (anim.phase === "title") return;          // 메뉴는 클릭으로 진행
-      if (anim.phase === "game-end") { anim.phase = "title"; ui.menu = "mode"; ui.pickStep = 0; netClose(); return; }
+      if (anim.phase === "game-end") {
+      if (ui.mode === "career" && career) { finishCareerGame(); return; }
+      anim.phase = "title"; ui.menu = "mode"; ui.pickStep = 0; netClose(); return;
+    }
       playerSwing();
       return;
     }
