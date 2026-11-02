@@ -439,6 +439,186 @@
     }
   }
 
+  // ===================== 순위표 =====================
+  // 내 경기는 실제 엔진으로 치르고, 나머지 팀 경기는 전력 기반으로 빠르게 처리한다.
+  // (9이닝 엔진으로 매일 4경기를 돌리면 클릭마다 1초 넘게 멈춘다)
+  function teamStrength(id) {
+    const sm = teamSummary(teamDataById(id));
+    return {
+      off: sm.contact * 0.5 + sm.power * 0.35 + sm.speed * 0.15,
+      def: sm.control * 0.6 + sm.stamina * 0.4
+    };
+  }
+  let LEAGUE_STR = null;
+  function leagueStrength() {
+    if (LEAGUE_STR) return LEAGUE_STR;
+    let o = 0, d = 0;
+    TEAM_DATA.forEach(function (t) {
+      const st = teamStrength(t.short);
+      o += st.off; d += st.def;
+    });
+    LEAGUE_STR = { off: o / TEAM_DATA.length, def: d / TEAM_DATA.length };
+    return LEAGUE_STR;
+  }
+  function simRuns(attackId, defendId) {
+    const lg = leagueStrength();
+    const lam = clamp(4.3 + (teamStrength(attackId).off - lg.off) * 16
+      - (teamStrength(defendId).def - lg.def) * 12, 1.2, 11);
+    let r = 0;
+    for (let i = 0; i < 14; i++) if (Math.random() < lam / 14) r++;
+    return r;
+  }
+  function simOneGame(homeId, awayId) {
+    let h = simRuns(homeId, awayId), a = simRuns(awayId, homeId);
+    if (h === a) (Math.random() < 0.5 ? h++ : a++);     // 무승부 없이 끝낸다
+    return { home: h, away: a };
+  }
+
+  function emptyStandings() {
+    const st = {};
+    TEAM_DATA.forEach(function (t) { st[t.short] = { w: 0, l: 0, rf: 0, ra: 0 }; });
+    return st;
+  }
+  function ensureStandings() {
+    if (!career.standings) career.standings = emptyStandings();
+    return career.standings;
+  }
+  function recordResult(teamId, oppId, rf, ra) {
+    const st = ensureStandings();
+    if (!st[teamId] || !st[oppId]) return;
+    st[teamId].rf += rf; st[teamId].ra += ra;
+    st[oppId].rf += ra; st[oppId].ra += rf;
+    if (rf > ra) { st[teamId].w++; st[oppId].l++; }
+    else if (rf < ra) { st[teamId].l++; st[oppId].w++; }
+  }
+  // 내 경기 외 나머지 팀들도 같은 날 한 경기씩 치른다
+  function simOtherTeams() {
+    const rest = TEAM_DATA.map(function (t) { return t.short; })
+      .filter(function (id) { return id !== career.teamId && id !== ui.oppTeam; });
+    for (let i = rest.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      const tmp = rest[i]; rest[i] = rest[j]; rest[j] = tmp;
+    }
+    for (let i = 0; i + 1 < rest.length; i += 2) {
+      const r = simOneGame(rest[i], rest[i + 1]);
+      recordResult(rest[i], rest[i + 1], r.home, r.away);
+    }
+  }
+  function standingsTable() {
+    const st = ensureStandings();
+    return TEAM_DATA.map(function (t) {
+      const r = st[t.short];
+      const g = r.w + r.l;
+      return { id: t.short, name: t.name, w: r.w, l: r.l, pct: g ? r.w / g : 0, diff: r.rf - r.ra };
+    }).sort(function (a, b) {
+      if (b.pct !== a.pct) return b.pct - a.pct;
+      if (b.w !== a.w) return b.w - a.w;
+      return b.diff - a.diff;
+    });
+  }
+  function myRank() {
+    const tb = standingsTable();
+    for (let i = 0; i < tb.length; i++) if (tb[i].id === career.teamId) return { rank: i + 1, row: tb[i] };
+    return { rank: 0, row: { w: 0, l: 0 } };
+  }
+
+  // ===================== 효과음 =====================
+  // 음원 파일 없이 WebAudio 로 합성한다. 첫 클릭 때 오디오를 깨운다.
+  let actx = null, sndOn = true;
+  try { sndOn = localStorage.getItem("baseball-sound") !== "off"; } catch (e) {}
+
+  function audio() {
+    if (!actx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      actx = new AC();
+    }
+    if (actx.state === "suspended") actx.resume();
+    return actx;
+  }
+  function noiseBuffer(ctxA, sec) {
+    const n = Math.floor(ctxA.sampleRate * sec);
+    const buf = ctxA.createBuffer(1, n, ctxA.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+    return buf;
+  }
+  // 짧은 잡음 타격음 (배트, 미트)
+  function burst(freq, dur, vol, type) {
+    const a = audio();
+    if (!a || !sndOn) return;
+    const src = a.createBufferSource();
+    src.buffer = noiseBuffer(a, dur);
+    const f = a.createBiquadFilter();
+    f.type = type || "bandpass";
+    f.frequency.value = freq;
+    f.Q.value = 1.2;
+    const g = a.createGain();
+    g.gain.setValueAtTime(vol, a.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, a.currentTime + dur);
+    src.connect(f); f.connect(g); g.connect(a.destination);
+    src.start();
+    src.stop(a.currentTime + dur);
+  }
+  // 음정이 있는 짧은 음 (휘슬, 알림)
+  function tone(freq, dur, vol, slideTo) {
+    const a = audio();
+    if (!a || !sndOn) return;
+    const o = a.createOscillator();
+    const g = a.createGain();
+    o.type = "triangle";
+    o.frequency.setValueAtTime(freq, a.currentTime);
+    if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, a.currentTime + dur);
+    g.gain.setValueAtTime(vol, a.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, a.currentTime + dur);
+    o.connect(g); g.connect(a.destination);
+    o.start();
+    o.stop(a.currentTime + dur);
+  }
+  // 관중 함성 — 잡음을 서서히 키웠다 줄인다
+  function crowd(level, dur) {
+    const a = audio();
+    if (!a || !sndOn) return;
+    const src = a.createBufferSource();
+    src.buffer = noiseBuffer(a, dur);
+    const f = a.createBiquadFilter();
+    f.type = "bandpass"; f.frequency.value = 700; f.Q.value = 0.6;
+    const g = a.createGain();
+    g.gain.setValueAtTime(0.0001, a.currentTime);
+    g.gain.exponentialRampToValueAtTime(level, a.currentTime + dur * 0.25);
+    g.gain.exponentialRampToValueAtTime(0.0001, a.currentTime + dur);
+    src.connect(f); f.connect(g); g.connect(a.destination);
+    src.start();
+    src.stop(a.currentTime + dur);
+  }
+
+  function sfx(kind) {
+    if (!sndOn) return;
+    if (kind === "hit") { burst(420, 0.09, 0.5); tone(240, 0.07, 0.12, 140); }
+    else if (kind === "homerun") { burst(380, 0.12, 0.6); crowd(0.22, 1.6); }
+    else if (kind === "mitt") burst(190, 0.07, 0.3, "lowpass");
+    else if (kind === "swingmiss") burst(1400, 0.06, 0.12, "highpass");
+    else if (kind === "foul") burst(600, 0.07, 0.25);
+    else if (kind === "out") { tone(300, 0.1, 0.1, 180); }
+    else if (kind === "score") crowd(0.16, 1.1);
+    else if (kind === "click") tone(660, 0.05, 0.08);
+  }
+
+  const SOUND_BTN = { x: W - 44, y: 104, w: 32, h: 32 };   // 경기 중 투수 패널(y 12~96)을 피한다
+  function drawSoundBtn() {
+    roundRect(SOUND_BTN.x, SOUND_BTN.y, SOUND_BTN.w, SOUND_BTN.h, 8,
+      "rgba(10,14,18,0.6)", "rgba(255,255,255,0.18)");
+    ctx.textAlign = "center";
+    ctx.font = "15px 'Trebuchet MS', sans-serif";
+    ctx.fillStyle = sndOn ? "#ffd54f" : "#5a646d";
+    ctx.fillText(sndOn ? "\u266A" : "\u00D7", SOUND_BTN.x + SOUND_BTN.w / 2, SOUND_BTN.y + 21);
+  }
+  function toggleSound() {
+    sndOn = !sndOn;
+    try { localStorage.setItem("baseball-sound", sndOn ? "on" : "off"); } catch (e) {}
+    if (sndOn) sfx("click");
+  }
+
   let simMode = false;          // true면 내 선수 차례가 아니라 자동 진행
   const SIM_SPEED = 18;         // 자동 진행 배속
   const SEASON_GAMES = 30;
@@ -509,6 +689,24 @@
     return d;
   }
 
+  // 저장된 육성 선수가 있으면 그대로 이어서 한다
+  function resumeCareer() {
+    const c = loadCareer();
+    if (!c || !c.type) return;
+    career = c;
+    ensureStandings();
+    career.season = career.season || 1;
+    career.history = career.history || [];
+    ui.mode = "career";
+    ui.myTeam = career.teamId;
+    ui.growth = [];
+    ui.lastScore = "";
+    ui.oppTeam = ui.oppTeam || TEAM_DATA[0].short;
+    simMode = false;
+    anim.phase = "title";
+    ui.menu = (career.finals && career.finals.done) || career.day >= SEASON_GAMES ? "season" : "day";
+  }
+
   function startCareer() {
     const m = ui.make;
     career = m.type === "batter"
@@ -518,6 +716,9 @@
     ui.mode = "career";
     ui.myTeam = career.teamId;
     ui.growth = null;
+    career.standings = emptyStandings();
+    career.season = 1;
+    career.history = [];
     nextCareerGame();
   }
 
@@ -539,19 +740,84 @@
       while (anim.phase !== "game-end" && guard++ < 400000) update(16);
       career.lastLine = "휴식일 (등판 없음)";
       career.day++;
+      recordResult(career.teamId, ui.oppTeam, game.runs.home, game.runs.away);
+      simOtherTeams();
       saveCareer();
       ui.growth = [];
       ui.lastScore = game.runs.away + " : " + game.runs.home;
-      ui.menu = career.day >= SEASON_GAMES ? "season" : "day";
       anim.phase = "title";
+      if (career.day >= SEASON_GAMES) { startFinals(); return; }
+      ui.menu = "day";
     }
+  }
+
+  // 정규시즌이 끝나면 1·2위가 한국시리즈 단판으로 맞붙는다.
+  // 내 팀이 올라가면 직접 치르고, 아니면 결과만 본다.
+  function startFinals() {
+    const tb = standingsTable();
+    career.finals = { home: tb[0].id, away: tb[1].id, done: false };
+    saveCareer();
+    if (tb[0].id === career.teamId || tb[1].id === career.teamId) {
+      ui.oppTeam = (tb[0].id === career.teamId) ? tb[1].id : tb[0].id;
+      setTeams(career.teamId, ui.oppTeam);
+      injectCareerPlayer();                      // 큰 경기엔 무조건 나간다
+      newGame();
+      simMode = true;
+      ui.menu = "day";
+      anim.phase = "half-start";
+      return;
+    }
+    const r = simOneGame(career.finals.home, career.finals.away);
+    career.finals.score = r;
+    career.finals.winner = r.home > r.away ? career.finals.home : career.finals.away;
+    career.finals.done = true;
+    saveCareer();
+    ui.menu = "season";
+    anim.phase = "title";
+  }
+
+  function finishFinals() {
+    const f = career.finals;
+    f.score = { home: game.runs.home, away: game.runs.away };
+    f.winner = game.runs.home > game.runs.away ? career.teamId : ui.oppTeam;
+    f.done = true;
+    careerGrow();
+    saveCareer();
+    ui.menu = "season";
+    anim.phase = "title";
+  }
+
+  function startNextSeason() {
+    const mr = myRank();
+    career.history = career.history || [];
+    career.history.push({
+      season: career.season || 1,
+      rank: mr.rank,
+      w: mr.row.w, l: mr.row.l,
+      champ: career.finals && career.finals.winner === career.teamId,
+      stats: JSON.parse(JSON.stringify(career.stats))
+    });
+    career.season = (career.season || 1) + 1;
+    career.day = 0;
+    career.finals = null;
+    career.standings = emptyStandings();
+    career.stats = career.type === "batter"
+      ? { g: 0, ab: 0, hit: 0, hr: 0, rbi: 0, bb: 0, k: 0, sb: 0 }
+      : { g: 0, outs: 0, k: 0, bb: 0, runs: 0, pitches: 0 };
+    saveCareer();
+    nextCareerGame();
   }
 
   function finishCareerGame() {
     ui.growth = careerGrow() || [];
     ui.lastScore = game.runs.away + " : " + game.runs.home;
-    ui.menu = career.day >= SEASON_GAMES ? "season" : "day";
+    if (career.finals && !career.finals.done) { finishFinals(); return; }
+    recordResult(career.teamId, ui.oppTeam, game.runs.home, game.runs.away);
+    simOtherTeams();
+    saveCareer();
     anim.phase = "title";
+    if (career.day >= SEASON_GAMES) { startFinals(); return; }
+    ui.menu = "day";
   }
 
   function loadCareer() {
@@ -1179,6 +1445,7 @@
     buildRunnerAnim(before, br, runs, res.kind);
 
     addRuns(runs);
+    if (runs > 0 && res.kind !== "homerun") sfx("score");
     game.outs += outsAdded;
 
     const label = (extra ? extra + " " : "") + (runs > 0 ? "(" + runs + "점)" : "");
@@ -1194,6 +1461,7 @@
   // ===================== 페이즈 =====================
   function setPhase(p, dur) {
     anim.phase = p;
+    anim.mittPlayed = false;
     anim.time = 0;
     anim.dur = dur || 0;
   }
@@ -1307,6 +1575,7 @@
     const c = contactQuality(offsetMs, { x: pt.fx, y: pt.fy }, b);
 
     if (!c) {
+      sfx("swingmiss");
       anim.missOffset = Math.round(offsetMs);
       setPhase("catch", 420);
       anim.pendingResult = "swing-miss";
@@ -1321,6 +1590,7 @@
       if (game.strikes < 2) game.strikes++;
       ui.message = "파울";
       logPitch({ x: pt.fx, y: pt.fy }, "foul");
+      sfx("foul");
       anim.contact = c;
       flash = 1; shake = 4;
       netSendOutcome("foul");
@@ -1329,6 +1599,7 @@
     }
 
     logPitch({ x: pt.fx, y: pt.fy }, "hit");
+    sfx(res.kind === "homerun" ? "homerun" : "hit");
     flash = 1;
     shake = res.kind === "homerun" ? 12 : 6;
     anim.contact = c;
@@ -1467,6 +1738,7 @@
         applyCount();
       }
     } else if (p === "catch") {
+      if (!anim.mittPlayed) { anim.mittPlayed = true; sfx("mitt"); }
       if (anim.time >= anim.dur) {
         // 온라인에서 타자 쪽이 스스로 볼카운트를 매기면 상대와 어긋나고,
         // 다음 투구 대기로 먼저 넘어가 서로 기다리는 교착이 생긴다
@@ -1545,6 +1817,7 @@
 
   function menuClick(pt) {
     if (ui.menu === "mode") {
+      if (inRect(pt, CONT_BTN) && savedCareer()) { resumeCareer(); return; }
       for (let i = 0; i < MODE_BTN.length; i++) {
         if (inRect(pt, MODE_BTN[i])) {
           ui.mode = MODE_BTN[i].id;
@@ -1578,6 +1851,7 @@
       }
       return;
     }
+    if (ui.menu === "rank") { rankMenuClick(pt); return; }
     if (ui.menu === "day") { dayMenuClick(pt); return; }
     if (ui.menu === "season") { seasonMenuClick(pt); return; }
     if (ui.menu === "create") { createMenuClick(pt); return; }
@@ -1599,6 +1873,7 @@
   }
 
   function handleClick(pt) {
+    if (inRect(pt, SOUND_BTN)) { toggleSound(); return; }
     if (anim.phase === "title") { menuClick(pt); return; }
     if (anim.phase === "game-end") {
       if (ui.mode === "career" && career) { finishCareerGame(); return; }
@@ -2853,6 +3128,9 @@
     ctx.fillRect(0, 0, W, H);
   }
 
+  const CONT_BTN = { x: W / 2 - 130, y: 428, w: 260, h: 40 };
+  function savedCareer() { const c = loadCareer(); return c && c.type ? c : null; }
+
   function drawModeMenu() {
     menuBg();
     ctx.textAlign = "center";
@@ -2877,10 +3155,20 @@
       ctx.fillText(b.desc, b.x + b.w / 2, b.y + 76);
     });
 
+    const sc = savedCareer();
+    if (sc) {
+      roundRect(CONT_BTN.x, CONT_BTN.y, CONT_BTN.w, CONT_BTN.h, 10,
+        "rgba(255,213,79,0.14)", "rgba(255,213,79,0.5)");
+      ctx.font = "bold 15px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+      ctx.fillStyle = "#ffd54f";
+      ctx.fillText("이어하기 — " + sc.name + " (" + (sc.season || 1) + "시즌 " + sc.day + "경기)",
+        W / 2, CONT_BTN.y + 26);
+    }
+
     ctx.font = "13px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
     ctx.fillStyle = "#6b7883";
-    ctx.fillText("3아웃 공수교대 · 9회 · 동점이면 12회까지 연장", W / 2, 470);
-    ctx.fillText("투수 교체 C · 도루 S · 스윙 클릭/스페이스", W / 2, 494);
+    ctx.fillText("3아웃 공수교대 · 9회 · 동점이면 12회까지 연장", W / 2, 506);
+    ctx.fillText("투수 교체 C · 도루 S · 스윙 클릭/스페이스", W / 2, 530);
   }
 
   function drawTeamMenu() {
@@ -3330,6 +3618,73 @@
     return [["제구", career.control], ["체력", career.stamina / 120]];
   }
 
+  const RANK_BTN = { x: W - 160, y: H - 60, w: 130, h: 40 };
+
+  function drawStandings(title, highlightTop) {
+    menuBg();
+    ctx.textAlign = "center";
+    ctx.font = "bold 28px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#fff";
+    ctx.fillText(title || "순위표", W / 2, 54);
+    ctx.font = "12px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#6b7883";
+    ctx.fillText(career.season + "시즌  " + career.day + " / " + SEASON_GAMES + " 경기", W / 2, 78);
+
+    const tb = standingsTable();
+    const x0 = 200, y0 = 104, rowH = 36;
+    ctx.textAlign = "left";
+    ctx.font = "11px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#6b7883";
+    ctx.fillText("순위", x0, y0);
+    ctx.fillText("구단", x0 + 46, y0);
+    ctx.textAlign = "right";
+    ctx.fillText("승", x0 + 330, y0);
+    ctx.fillText("패", x0 + 380, y0);
+    ctx.fillText("승률", x0 + 450, y0);
+    ctx.fillText("득실", x0 + 520, y0);
+
+    const lead = tb[0];
+    tb.forEach(function (r, i) {
+      const y = y0 + 14 + i * rowH;
+      const me = r.id === career.teamId;
+      const top = highlightTop && i < 2;
+      if (me || top) {
+        roundRect(x0 - 12, y - 4, 552, rowH - 6, 6,
+          me ? "rgba(26,115,232,0.28)" : "rgba(255,213,79,0.14)",
+          me ? "#64b5f6" : "rgba(255,213,79,0.4)");
+      }
+      ctx.textAlign = "left";
+      ctx.font = "bold 14px 'Trebuchet MS', sans-serif";
+      ctx.fillStyle = i === 0 ? "#ffd54f" : (me ? "#fff" : "#9fb0bd");
+      ctx.fillText(String(i + 1), x0, y + 16);
+      const td = teamDataById(r.id);
+      roundRect(x0 + 30, y + 4, 8, 16, 2, td.color);
+      ctx.font = (me ? "bold " : "") + "14px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+      ctx.fillStyle = me ? "#fff" : "#cfd8dd";
+      ctx.fillText(r.name + (me ? "  (나)" : ""), x0 + 46, y + 16);
+      ctx.textAlign = "right";
+      ctx.font = "14px 'Trebuchet MS', sans-serif";
+      ctx.fillStyle = "#e8eef2";
+      ctx.fillText(String(r.w), x0 + 330, y + 16);
+      ctx.fillText(String(r.l), x0 + 380, y + 16);
+      ctx.fillText(r.pct.toFixed(3).replace("0.", "."), x0 + 450, y + 16);
+      ctx.fillStyle = r.diff > 0 ? "#81c784" : (r.diff < 0 ? "#ff8a80" : "#9fb0bd");
+      ctx.fillText((r.diff > 0 ? "+" : "") + r.diff, x0 + 520, y + 16);
+    });
+  }
+
+  function drawRankMenu() {
+    drawStandings("순위표", false);
+    roundRect(BACK_BTN.x, BACK_BTN.y, BACK_BTN.w, BACK_BTN.h, 8, "rgba(255,255,255,0.1)", "rgba(255,255,255,0.25)");
+    ctx.textAlign = "center";
+    ctx.font = "bold 14px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#cfd8dd";
+    ctx.fillText("돌아가기", BACK_BTN.x + BACK_BTN.w / 2, BACK_BTN.y + 25);
+  }
+  function rankMenuClick(pt) {
+    if (inRect(pt, BACK_BTN)) ui.menu = "day";
+  }
+
   function drawDayMenu() {
     menuBg();
     const t = teamDataById(career.teamId);
@@ -3345,8 +3700,10 @@
       : (PIT_ROLE.find(function (x) { return x.id === career.role; }) || {}).name + " · " +
         (career.hand === "L" ? "좌완" : "우완") + " " + ARM_SLOTS[career.arm].name;
     ctx.fillText(role, W / 2, 84);
+    const mr = myRank();
     ctx.fillStyle = "#ffd54f";
-    ctx.fillText("시즌 " + career.day + " / " + SEASON_GAMES + " 경기", W / 2, 110);
+    ctx.fillText("시즌 " + career.day + " / " + SEASON_GAMES + " 경기   ·   " +
+      (mr.rank ? mr.rank + "위  " + mr.row.w + "승 " + mr.row.l + "패" : "개막 전"), W / 2, 110);
 
     roundRect(W / 2 - 300, 136, 290, 160, 10, "rgba(255,255,255,0.07)", "rgba(255,255,255,0.18)");
     ctx.textAlign = "left";
@@ -3421,39 +3778,92 @@
     ctx.font = "bold 14px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
     ctx.fillStyle = "#cfd8dd";
     ctx.fillText("나가기", BACK_BTN.x + BACK_BTN.w / 2, BACK_BTN.y + 25);
+
+    roundRect(RANK_BTN.x, RANK_BTN.y, RANK_BTN.w, RANK_BTN.h, 8, "rgba(255,255,255,0.12)", "rgba(255,255,255,0.28)");
+    ctx.fillStyle = "#ffd54f";
+    ctx.fillText("순위표", RANK_BTN.x + RANK_BTN.w / 2, RANK_BTN.y + 25);
   }
 
   const SEASON_BTN = { x: W / 2 - 90, y: 440, w: 180, h: 46 };
 
   function drawSeasonEnd() {
     menuBg();
+    const f = career.finals || {};
+    const champ = f.winner === career.teamId;
+    const mr = myRank();
     ctx.textAlign = "center";
-    ctx.font = "bold 34px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
-    ctx.fillStyle = "#ffd54f";
-    ctx.fillText("시즌 종료", W / 2, 120);
-    ctx.font = "16px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
-    ctx.fillStyle = "#fff";
-    ctx.fillText(career.name + "  (" + teamDataById(career.teamId).name + ")", W / 2, 160);
+
+    ctx.font = "bold 32px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = champ ? "#ffd54f" : "#cfd8dd";
+    ctx.fillText(champ ? "우승!" : "시즌 종료", W / 2, 56);
+
+    ctx.font = "14px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#9fb0bd";
+    if (f.winner) {
+      ctx.fillText("한국시리즈  " + teamDataById(f.home).short + " " +
+        (f.score ? f.score.home + " : " + f.score.away : "") + "  " + teamDataById(f.away).short +
+        "   →   " + teamDataById(f.winner).name + " 우승", W / 2, 84);
+    }
+
+    // 최종 순위
+    const tb = standingsTable();
+    const x0 = 120, y0 = 112;
+    ctx.textAlign = "left";
+    ctx.font = "bold 13px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#cfd8dd";
+    ctx.fillText("최종 순위", x0, y0);
+    tb.forEach(function (r, i) {
+      const y = y0 + 22 + i * 24;
+      const me = r.id === career.teamId;
+      ctx.font = (me ? "bold " : "") + "13px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+      ctx.fillStyle = i === 0 ? "#ffd54f" : (me ? "#fff" : "#8d9aa5");
+      ctx.fillText((i + 1) + ".  " + r.name + (me ? "  (나)" : ""), x0, y);
+      ctx.textAlign = "right";
+      ctx.fillText(r.w + "승 " + r.l + "패", x0 + 300, y);
+      ctx.textAlign = "left";
+    });
+
+    // 내 성적
+    const bx = 540;
+    ctx.font = "bold 13px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#cfd8dd";
+    ctx.fillText(career.season + "시즌  " + career.name, bx, y0);
     const st = career.stats;
     ctx.font = "15px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
-    ctx.fillStyle = "#cfd8dd";
+    ctx.fillStyle = "#fff";
     ctx.fillText(career.type === "batter"
-      ? st.g + "경기  타율 " + (st.ab ? (st.hit / st.ab).toFixed(3).replace("0.", ".") : ".000") +
-        "  " + st.hit + "안타  " + st.rbi + "타점  " + st.sb + "도루"
-      : st.g + "경기  " + st.k + "탈삼진  " + st.runs + "실점  " + st.pitches + "구", W / 2, 200);
+      ? st.g + "경기  타율 " + (st.ab ? (st.hit / st.ab).toFixed(3).replace("0.", ".") : ".000")
+      : st.g + "경기  " + st.k + "탈삼진", bx, y0 + 28);
+    ctx.font = "13px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+    ctx.fillStyle = "#9fb0bd";
+    ctx.fillText(career.type === "batter"
+      ? st.hit + "안타  " + st.rbi + "타점  " + st.sb + "도루"
+      : st.runs + "실점  " + st.pitches + "구", bx, y0 + 50);
 
     careerRatingRows().forEach(function (r, i) {
-      const y = 250 + i * 34;
-      ctx.textAlign = "right";
-      ctx.font = "13px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
-      ctx.fillStyle = "#9fb0bd";
-      ctx.fillText(r[0], W / 2 - 110, y + 11);
-      roundRect(W / 2 - 100, y, 200, 14, 7, "rgba(255,255,255,0.12)");
-      roundRect(W / 2 - 100, y, 200 * clamp(r[1], 0.05, 1), 14, 7, "#4fc3f7");
+      const y = y0 + 84 + i * 30;
       ctx.textAlign = "left";
+      ctx.font = "12px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+      ctx.fillStyle = "#9fb0bd";
+      ctx.fillText(r[0], bx, y + 11);
+      roundRect(bx + 48, y, 170, 13, 6, "rgba(255,255,255,0.12)");
+      roundRect(bx + 48, y, 170 * clamp(r[1], 0.05, 1), 13, 6, "#4fc3f7");
       ctx.fillStyle = "#fff";
-      ctx.fillText(String(Math.round(r[1] * 100)), W / 2 + 110, y + 11);
+      ctx.fillText(String(Math.round(r[1] * 100)), bx + 228, y + 11);
     });
+
+    // 지난 시즌 기록
+    const hist = (career.history || []).slice(-4);
+    if (hist.length) {
+      ctx.font = "bold 12px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+      ctx.fillStyle = "#6b7883";
+      ctx.fillText("지난 시즌", bx, y0 + 200);
+      hist.forEach(function (h, i) {
+        ctx.font = "12px 'Trebuchet MS', 'Malgun Gothic', sans-serif";
+        ctx.fillStyle = h.champ ? "#ffd54f" : "#8d9aa5";
+        ctx.fillText(h.season + "시즌  " + h.rank + "위" + (h.champ ? "  우승" : ""), bx, y0 + 220 + i * 18);
+      });
+    }
 
     roundRect(SEASON_BTN.x, SEASON_BTN.y, SEASON_BTN.w, SEASON_BTN.h, 10, "rgba(26,115,232,0.9)", "#64b5f6");
     ctx.textAlign = "center";
@@ -3471,23 +3881,17 @@
 
   function dayMenuClick(pt) {
     if (inRect(pt, NEXT_BTN)) { nextCareerGame(); return; }
+    if (inRect(pt, RANK_BTN)) { ui.menu = "rank"; return; }
     if (inRect(pt, BACK_BTN)) { leaveCareer(); return; }
   }
   function seasonMenuClick(pt) {
-    if (inRect(pt, SEASON_BTN)) {
-      career.day = 0;
-      career.stats = career.type === "batter"
-        ? { g: 0, ab: 0, hit: 0, hr: 0, rbi: 0, bb: 0, k: 0, sb: 0 }
-        : { g: 0, outs: 0, k: 0, bb: 0, runs: 0, pitches: 0 };
-      saveCareer();
-      nextCareerGame();
-      return;
-    }
+    if (inRect(pt, SEASON_BTN)) { startNextSeason(); return; }
     if (inRect(pt, BACK_BTN)) { leaveCareer(); return; }
   }
 
   function drawTitle() {
-    if (ui.menu === "day") drawDayMenu();
+    if (ui.menu === "rank") drawRankMenu();
+    else if (ui.menu === "day") drawDayMenu();
     else if (ui.menu === "season") drawSeasonEnd();
     else if (ui.menu === "create") drawCreateMenu();
     else if (ui.menu === "team") drawTeamMenu();
@@ -3634,6 +4038,7 @@
       drawSubPanel();
     }
     if (anim.phase === "title") drawTitle();
+    drawSoundBtn();
     if (anim.phase === "game-end") drawGameEnd();
   }
 
@@ -3721,8 +4126,6 @@
     if (e.key === "s" || e.key === "S") { e.preventDefault(); trySteal(); }
     if (e.key === "Escape") ui.showSub = false;
   });
-
-  window.addEventListener("error", function (ev) { noteError("event", (ev && ev.error) || ev); });
 
   requestAnimationFrame(loop);
 })();
